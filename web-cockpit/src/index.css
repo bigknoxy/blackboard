@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* BPMN-js canvas styling overrides for dark cockpit theme */
+.bjs-container {
+  background-color: #f8fafc;
+  border-radius: 0.5rem;
+}

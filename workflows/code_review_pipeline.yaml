@@ -1,0 +1,118 @@
+id: code_review_pipeline
+name: End-to-End Autonomous Code Review & Release Pipeline
+description: >
+  Multi-agent Blackboard pipeline: Research & Hypothesis -> Technical Spec ->
+  Code Synthesis -> Sandbox Pytest Verification -> Security Critique -> HITL Sign-Off.
+nodes:
+  - id: start_pipeline
+    name: Pipeline Triggered
+    type: StartEvent
+
+  - id: stage_research
+    name: Research & Hypothesis
+    type: ServiceTask
+    agent_id: architect
+    entry_type: hypothesis
+    prompt_template: >
+      Search the repository context and formulate architectural hypotheses, risk boundaries,
+      and memory budget constraints for the requested feature or patch.
+
+  - id: stage_spec
+    name: Draft Technical Specification
+    type: ServiceTask
+    agent_id: architect
+    entry_type: spec
+    prompt_template: >
+      Synthesize a formal technical specification (`spec`) based on the research hypothesis
+      and any operator steering instructions on the Blackboard.
+
+  - id: stage_code
+    name: Implement Candidate Patch
+    type: ServiceTask
+    agent_id: coder
+    entry_type: code
+    prompt_template: >
+      Implement production-ready Python/React code conforming strictly to the Blackboard
+      specification and hydrated `<prior_experience>` memories.
+
+  - id: gateway_fork_qa_sec
+    name: Parallel Verification Fork
+    type: ParallelGateway
+
+  - id: stage_test
+    name: Sandbox Pytest Verification
+    type: ServiceTask
+    agent_id: qa-tester
+    entry_type: test_result
+    prompt_template: >
+      Execute isolated unit and integration test suites against the candidate code artifact
+      and publish deterministic test coverage metrics.
+
+  - id: stage_review
+    name: Security & OWASP Audit
+    type: ServiceTask
+    agent_id: sec-auditor
+    entry_type: critique
+    prompt_template: >
+      Perform static security analysis (OWASP Top 10 / CWE) on the specification and code,
+      and publish a security critique.
+
+  - id: gateway_join_qa_sec
+    name: Verification Convergence
+    type: ParallelGateway
+
+  - id: gateway_verdict
+    name: Audit Verdict Gate
+    type: ExclusiveGateway
+
+  - id: stage_hitl_signoff
+    name: Operator Release Sign-Off
+    type: UserTask
+    agent_id: human-operator
+    prompt_template: >
+      Review the Blackboard spec, code, pytest report, and security critique before
+      approving final production release.
+
+  - id: end_pipeline
+    name: Pipeline Completed
+    type: EndEvent
+
+edges:
+  - id: flow_1
+    source: start_pipeline
+    target: stage_research
+  - id: flow_2
+    source: stage_research
+    target: stage_spec
+  - id: flow_3
+    source: stage_spec
+    target: stage_code
+  - id: flow_4
+    source: stage_code
+    target: gateway_fork_qa_sec
+  - id: flow_5a
+    source: gateway_fork_qa_sec
+    target: stage_test
+  - id: flow_5b
+    source: gateway_fork_qa_sec
+    target: stage_review
+  - id: flow_6a
+    source: stage_test
+    target: gateway_join_qa_sec
+  - id: flow_6b
+    source: stage_review
+    target: gateway_join_qa_sec
+  - id: flow_7
+    source: gateway_join_qa_sec
+    target: gateway_verdict
+  - id: flow_8_pass
+    source: gateway_verdict
+    target: stage_hitl_signoff
+    condition: PASS
+  - id: flow_8_rework
+    source: gateway_verdict
+    target: stage_code
+    condition: REWORK
+  - id: flow_9
+    source: stage_hitl_signoff
+    target: end_pipeline

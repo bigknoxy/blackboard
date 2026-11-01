@@ -1,0 +1,229 @@
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class AgentModel(Base):
+    __tablename__ = "agents"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(255), nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    inference_config: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=lambda: {
+            "provider": "ollama",
+            "model_name": "qwen2.5-coder:14b",
+            "base_url": None,
+            "api_key": None,
+            "temperature": 0.2,
+        },
+    )
+    allowed_tools: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    subscribed_events: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    memories: Mapped[List["AgentMemoryModel"]] = relationship(
+        "AgentMemoryModel",
+        back_populates="agent",
+        cascade="all, delete-orphan",
+    )
+
+
+class AgentMemoryModel(Base):
+    __tablename__ = "agent_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    memory_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="episodic"
+    )  # episodic | semantic | reflection
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[Optional[List[float]]] = mapped_column(
+        Vector(768), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+
+    agent: Mapped["AgentModel"] = relationship(
+        "AgentModel", back_populates="memories"
+    )
+
+
+class MCPToolModel(Base):
+    __tablename__ = "mcp_tools"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    server_name: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="builtin"
+    )
+    transport: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="builtin"
+    )  # stdio | sse | http | builtin
+    endpoint_config: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    input_schema: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    requires_approval: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+class BlackboardEntryModel(Base):
+    __tablename__ = "blackboard_entries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    task_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    entry_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )  # hypothesis | critique | spec | code | test_result | steering | summary
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_blackboard_workflow_created", "workflow_id", "created_at"),
+    )
+
+
+class WorkflowModel(Base):
+    __tablename__ = "workflows"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    state_graph: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    yaml_source: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    bpmn_xml: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class WorkflowRunModel(Base):
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("workflows.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="RUNNING"
+    )  # RUNNING | AWAITING_APPROVAL | COMPLETED | FAILED
+    current_nodes: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    completed_nodes: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    context: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class HITLTicketModel(Base):
+    __tablename__ = "hitl_tickets"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    task_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    gate_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="tool_approval"
+    )  # tool_approval | user_task
+    tool_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    tool_arguments: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="PENDING", index=True
+    )  # PENDING | APPROVED | REJECTED
+    reviewer_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
