@@ -182,6 +182,29 @@ class ConciergeAdminAgent:
                 }
             )
 
+        # Meta-Workflow Trigger: create workflow / architect workflow intent
+        if any(
+            k in lowered for k in [
+                "create workflow", "new workflow", "build workflow",
+                "create a workflow", "architect workflow", "design workflow",
+                "create agent", "new agent"
+            ]
+        ):
+            meta_wf = await session.get(WorkflowModel, "meta_workflow_architect")
+            if meta_wf:
+                run = await workflow_engine.start_workflow_run(
+                    session, meta_wf, initial_prompt=msg
+                )
+                tool_calls_executed.append(
+                    {
+                        "tool": "trigger_meta_workflow",
+                        "workflow_id": "meta_workflow_architect",
+                        "run_id": str(run.id),
+                        "status": run.status,
+                        "description": "Triggered Meta-Workflow & Agent Architect Pipeline for Architect synthesis and Security Review.",
+                    }
+                )
+
         state_snapshot = await self._build_state_snapshot(
             session, req.workflow_id
         )
@@ -414,6 +437,10 @@ class ConciergeAdminAgent:
         if any(t["tool"] == "prune_blackboard" for t in executed_tools):
             lines.append(
                 "- **Blackboard Pruned:** Older debate entries were condensed into a `summary` entry."
+            )
+        if any(t["tool"] == "trigger_meta_workflow" for t in executed_tools):
+            lines.append(
+                "- **Meta-Architecture Pipeline Triggered:** Dispatched to `architect` to synthesize the workflow specification, followed by `sec-auditor` RBAC review and your final HITL activation gate."
             )
         return "\n".join(lines)
 

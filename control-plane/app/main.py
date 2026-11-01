@@ -147,7 +147,12 @@ async def seed_initial_state() -> None:
                     "api_key": None,
                     "temperature": 0.2,
                 },
-                "allowed_tools": ["repo_search", "ast_complexity_analyzer"],
+                "allowed_tools": [
+                    "repo_search",
+                    "ast_complexity_analyzer",
+                    "workflow_architect_validator",
+                    "workflow_activator",
+                ],
                 "subscribed_events": ["workflow.started", "spec.requested"],
             },
             {
@@ -1099,6 +1104,32 @@ async def decide_hitl_ticket(
             )
             session.add(bb_entry)
             await session.commit()
+
+            # If workflow_activator was approved, persist the new workflow into the database
+            if ticket.tool_id == "workflow_activator" and isinstance(tool_result, dict):
+                act_wf_id = tool_result.get("workflow_id")
+                act_yaml = (ticket.tool_arguments or {}).get("yaml_content")
+                if act_wf_id and act_yaml:
+                    existing_wf = await session.get(WorkflowModel, act_wf_id)
+                    parsed_g = workflow_engine.parse_yaml_to_graph(act_yaml)
+                    bpmn_x = workflow_engine.graph_to_bpmn_xml(act_wf_id, tool_result.get("workflow_name", act_wf_id), parsed_g)
+                    if existing_wf:
+                        existing_wf.name = tool_result.get("workflow_name", existing_wf.name)
+                        existing_wf.description = tool_result.get("description", existing_wf.description)
+                        existing_wf.state_graph = parsed_g
+                        existing_wf.yaml_source = act_yaml
+                        existing_wf.bpmn_xml = bpmn_x
+                    else:
+                        new_wf = WorkflowModel(
+                            id=act_wf_id,
+                            name=tool_result.get("workflow_name", act_wf_id),
+                            description=tool_result.get("description", "Architect-generated workflow"),
+                            state_graph=parsed_g,
+                            yaml_source=act_yaml,
+                            bpmn_xml=bpmn_x,
+                        )
+                        session.add(new_wf)
+                    await session.commit()
 
     # If this was a workflow UserTask gate, advance the workflow run
     if ticket.gate_type == "user_task":

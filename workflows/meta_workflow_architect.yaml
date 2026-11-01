@@ -1,0 +1,67 @@
+id: meta_workflow_architect
+name: Meta-Workflow & Agent Architect Pipeline
+description: >
+  Self-governing system pipeline: Architect synthesizes new workflow/agent spec ->
+  Security Auditor verifies RBAC & safety boundaries -> Operator HITL Review & Activation.
+nodes:
+  - id: start_meta_pipeline
+    name: Meta-Architecture Triggered
+    type: StartEvent
+
+  - id: stage_architect_design
+    name: Architect Workflow Synthesis
+    type: ServiceTask
+    agent_id: architect
+    entry_type: spec
+    prompt_template: >
+      Synthesize a rigorous, validated YAML state graph for the requested multi-agent workflow
+      or agent definition. Ensure all node types are valid (StartEvent, ServiceTask, ParallelGateway,
+      ExclusiveGateway, UserTask, EndEvent) and all assigned agents and tools exist in the system.
+
+  - id: stage_security_verification
+    name: Security & RBAC Boundary Review
+    type: ServiceTask
+    agent_id: sec-auditor
+    entry_type: critique
+    prompt_template: >
+      Audit the proposed workflow graph and agent permissions. Check for recursive loops,
+      unauthorized privilege escalation, missing HITL checkpoints on dangerous actions,
+      and ensure least-privilege tool assignments.
+
+  - id: gateway_meta_verdict
+    name: Meta Verification Verdict
+    type: ExclusiveGateway
+
+  - id: stage_operator_activation_gate
+    name: Operator Activation & Sign-Off Gate
+    type: UserTask
+    agent_id: human-operator
+    prompt_template: >
+      Review the Architect's synthesized workflow graph and the Security Auditor's verification
+      findings. Approve to activate the new workflow into the production control plane.
+
+  - id: end_meta_pipeline
+    name: Meta-Architecture Completed
+    type: EndEvent
+
+edges:
+  - id: mflow_1
+    source: start_meta_pipeline
+    target: stage_architect_design
+  - id: mflow_2
+    source: stage_architect_design
+    target: stage_security_verification
+  - id: mflow_3
+    source: stage_security_verification
+    target: gateway_meta_verdict
+  - id: mflow_4_pass
+    source: gateway_meta_verdict
+    target: stage_operator_activation_gate
+    condition: PASS
+  - id: mflow_4_rework
+    source: gateway_meta_verdict
+    target: stage_architect_design
+    condition: REWORK
+  - id: mflow_5
+    source: stage_operator_activation_gate
+    target: end_meta_pipeline
