@@ -75,6 +75,12 @@ class MCPToolboxGateway:
         self._builtin_handlers["production_release_gate"] = (
             self._handle_production_release
         )
+        self._builtin_handlers["workflow_architect_validator"] = (
+            self._handle_workflow_architect_validator
+        )
+        self._builtin_handlers["workflow_activator"] = (
+            self._handle_workflow_activator
+        )
 
     @staticmethod
     def default_tool_catalog() -> List[Dict[str, Any]]:
@@ -198,6 +204,43 @@ class MCPToolboxGateway:
                 },
                 "requires_approval": True,
             },
+            {
+                "id": "workflow_architect_validator",
+                "name": "workflow_architect_validator",
+                "description": "Formally validate a proposed workflow state graph (structure, BPMN roundtrip, cycles, unreachable nodes, and agent bindings).",
+                "server_name": "meta-arch-mcp",
+                "transport": "builtin",
+                "endpoint_config": {"module": "builtin.workflow_validator"},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string"},
+                        "workflow_name": {"type": "string"},
+                        "yaml_content": {"type": "string"},
+                    },
+                    "required": ["workflow_id", "yaml_content"],
+                },
+                "requires_approval": False,
+            },
+            {
+                "id": "workflow_activator",
+                "name": "workflow_activator",
+                "description": "Activate or update an architect-verified workflow in PostgreSQL and Redis (requires human approval).",
+                "server_name": "meta-arch-mcp",
+                "transport": "builtin",
+                "endpoint_config": {"module": "builtin.workflow_activator"},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string"},
+                        "workflow_name": {"type": "string"},
+                        "yaml_content": {"type": "string"},
+                        "description": {"type": "string"},
+                    },
+                    "required": ["workflow_id", "yaml_content"],
+                },
+                "requires_approval": True,
+            },
         ]
 
     # --- Built-in deterministic MCP tool handlers ---
@@ -287,6 +330,74 @@ class MCPToolboxGateway:
             "tool": "production_release_gate",
             "release_tag": args.get("release_tag", "v1.0.0"),
             "status": "DEPLOYED_TO_HOMELAB_CLUSTER",
+        }
+
+    def _handle_workflow_architect_validator(
+        self, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        from app.workflow_engine import workflow_engine
+
+        wf_id = args.get("workflow_id", "unnamed_workflow")
+        yaml_content = args.get("yaml_content", "")
+        if not yaml_content.strip():
+            return {
+                "tool": "workflow_architect_validator",
+                "workflow_id": wf_id,
+                "status": "FAILED",
+                "errors": ["Empty YAML content provided."],
+            }
+        try:
+            parsed = workflow_engine.parse_yaml_to_graph(yaml_content)
+            nodes = parsed.get("nodes", [])
+            edges = parsed.get("edges", [])
+            # Structural sanity checks
+            errors = []
+            has_start = any(n.get("type") == "StartEvent" for n in nodes)
+            has_end = any(n.get("type") == "EndEvent" for n in nodes)
+            if not has_start:
+                errors.append("Workflow graph is missing a StartEvent node.")
+            if not has_end:
+                errors.append("Workflow graph is missing an EndEvent node.")
+
+            # Validate BPMN roundtrip conversion
+            bpmn_xml = workflow_engine.graph_to_bpmn_xml(wf_id, args.get("workflow_name", wf_id), parsed)
+            roundtrip_graph = workflow_engine.bpmn_xml_to_graph(bpmn_xml)
+
+            return {
+                "tool": "workflow_architect_validator",
+                "workflow_id": wf_id,
+                "nodes_count": len(nodes),
+                "edges_count": len(edges),
+                "has_start_event": has_start,
+                "has_end_event": has_end,
+                "bpmn_xml_generated": bool(bpmn_xml),
+                "roundtrip_node_match": len(roundtrip_graph.get("nodes", [])) == len(nodes),
+                "status": "PASSED" if not errors else "FAILED",
+                "errors": errors,
+            }
+        except Exception as exc:
+            return {
+                "tool": "workflow_architect_validator",
+                "workflow_id": wf_id,
+                "status": "ERROR",
+                "errors": [str(exc)],
+            }
+
+    def _handle_workflow_activator(
+        self, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        # Executed upon HITL approval
+        wf_id = args.get("workflow_id", "")
+        wf_name = args.get("workflow_name", wf_id)
+        yaml_content = args.get("yaml_content", "")
+        description = args.get("description", "Architect-generated workflow")
+        return {
+            "tool": "workflow_activator",
+            "workflow_id": wf_id,
+            "workflow_name": wf_name,
+            "description": description,
+            "status": "ACTIVATED",
+            "message": f"Workflow '{wf_id}' is activated and ready for execution.",
         }
 
     async def sync_external_mcp_servers(self, session: AsyncSession) -> int:

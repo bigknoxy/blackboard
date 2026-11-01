@@ -862,6 +862,26 @@ class StatelessAgentRunner:
         for tool in allowed_tools:
             if not tool.get("requires_approval"):
                 tid = tool["id"]
+                if tid == "workflow_architect_validator":
+                    return {
+                        "tool_id": tid,
+                        "arguments": {
+                            "workflow_id": task.get("workflow_id", "dynamic_pipeline"),
+                            "workflow_name": task.get("node_name", "Dynamic Multi-Agent Pipeline"),
+                            "yaml_content": (
+                                "id: dynamic_pipeline\n"
+                                "name: Dynamic Multi-Agent Pipeline\n"
+                                "description: Architect-synthesized pipeline.\n"
+                                "nodes:\n"
+                                "  - id: start_node\n    name: Start\n    type: StartEvent\n"
+                                "  - id: exec_node\n    name: Execute Task\n    type: ServiceTask\n    agent_id: coder\n    entry_type: code\n"
+                                "  - id: end_node\n    name: End\n    type: EndEvent\n"
+                                "edges:\n"
+                                "  - id: e1\n    source: start_node\n    target: exec_node\n"
+                                "  - id: e2\n    source: exec_node\n    target: end_node\n"
+                            ),
+                        },
+                    }
                 if tid == "repo_search":
                     return {
                         "tool_id": tid,
