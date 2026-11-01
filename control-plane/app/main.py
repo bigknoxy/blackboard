@@ -41,6 +41,7 @@ from app.schemas import (
     ConciergeChatResponse,
     HITLDecisionRequest,
     HITLTicketResponse,
+    LLMRouterConfigRequest,
     MCPToolCreate,
     MCPToolResponse,
     MCPToolUpdate,
@@ -64,7 +65,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("blackboard.main")
 
-LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.100:11434")
+LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.8.136:11434")
 WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "/workflows"))
 
 
@@ -131,16 +132,16 @@ async def seed_initial_state() -> None:
         default_agents = [
             {
                 "id": "architect",
-                "name": "Principal Systems Architect",
+                "name": "Principal Systems Architect (CT118 qwen3-4b)",
                 "role": "Research & Specification Architect",
                 "system_prompt": (
                     "You are the Principal Systems Architect. Analyze requirements, search the repository, "
-                    "formulate hypotheses, and produce clear technical specifications (`spec`) with interface contracts."
+                    "formulate hypotheses, and produce clear, concise technical specifications (`spec`) with interface contracts."
                 ),
                 "inference_config": {
-                    "provider": "ollama",
-                    "model_name": "qwen2.5-coder:14b",
-                    "base_url": LOCAL_OLLAMA_URL,
+                    "provider": "openai",
+                    "model_name": "qwen3-4b",
+                    "base_url": "http://192.168.8.180:8081/v1",
                     "api_key": None,
                     "temperature": 0.2,
                 },
@@ -149,7 +150,7 @@ async def seed_initial_state() -> None:
             },
             {
                 "id": "coder",
-                "name": "Staff Implementation Engineer",
+                "name": "Staff Implementation Engineer (Ollama qwen2.5-coder:0.5b)",
                 "role": "Polyglot Code Synthesizer",
                 "system_prompt": (
                     "You are the Staff Implementation Engineer. Consume architecture specs and steering instructions "
@@ -157,7 +158,7 @@ async def seed_initial_state() -> None:
                 ),
                 "inference_config": {
                     "provider": "ollama",
-                    "model_name": "qwen2.5-coder:14b",
+                    "model_name": "qwen2.5-coder:0.5b",
                     "base_url": LOCAL_OLLAMA_URL,
                     "api_key": None,
                     "temperature": 0.15,
@@ -171,16 +172,16 @@ async def seed_initial_state() -> None:
             },
             {
                 "id": "qa-tester",
-                "name": "Autonomous Verification Engineer",
+                "name": "Autonomous Verification Engineer (CT118 lfm3-1.7b)",
                 "role": "Test & Sandbox Runner",
                 "system_prompt": (
                     "You are the Autonomous Verification Engineer. Execute isolated pytest suites against candidate code "
-                    "artifacts on the Blackboard and publish deterministic `test_result` entries."
+                    "artifacts on the Blackboard and publish concise `test_result` entries."
                 ),
                 "inference_config": {
-                    "provider": "ollama",
-                    "model_name": "qwen2.5-coder:14b",
-                    "base_url": LOCAL_OLLAMA_URL,
+                    "provider": "openai",
+                    "model_name": "lfm3-1.7b",
+                    "base_url": "http://192.168.8.180:8090/v1",
                     "api_key": None,
                     "temperature": 0.1,
                 },
@@ -189,16 +190,16 @@ async def seed_initial_state() -> None:
             },
             {
                 "id": "sec-auditor",
-                "name": "Application Security Auditor",
+                "name": "Application Security Auditor (CT118 lfm3-1.7b)",
                 "role": "Security & Compliance Reviewer",
                 "system_prompt": (
                     "You are the Application Security Auditor. Run OWASP/CWE static scans on specs and code, "
-                    "publish thorough security critiques (`critique`), and gate production releases."
+                    "publish concise security critiques (`critique`), and gate production releases."
                 ),
                 "inference_config": {
-                    "provider": "ollama",
-                    "model_name": "qwen2.5-coder:14b",
-                    "base_url": LOCAL_OLLAMA_URL,
+                    "provider": "openai",
+                    "model_name": "lfm3-1.7b",
+                    "base_url": "http://192.168.8.180:8090/v1",
                     "api_key": None,
                     "temperature": 0.1,
                 },
@@ -1141,6 +1142,172 @@ async def chat_with_concierge(
     payload: ConciergeChatRequest, session: AsyncSession = Depends(get_db)
 ) -> ConciergeChatResponse:
     return await concierge_agent.handle_chat(session, payload)
+
+
+# ==============================================================================
+# 7. MULTI-TIER LLM ROUTER & NVIDIA NIM GATEWAY (/api/v1/llm)
+# ==============================================================================
+@app.get("/api/v1/llm/status")
+async def get_llm_router_status() -> Dict[str, Any]:
+    import time as _time
+
+    redis_client = await get_redis()
+    env_nim_key = os.getenv("NVIDIA_NIM_API_KEY", "")
+    r_nim_key = await redis_client.get("llm:config:nim_api_key")
+    effective_key = r_nim_key or env_nim_key
+
+    r_model = await redis_client.get("llm:config:default_nim_model")
+    default_nim_model = r_model or os.getenv(
+        "NVIDIA_NIM_DEFAULT_MODEL", "meta/llama-3.3-70b-instruct"
+    )
+    r_rpm = await redis_client.get("llm:config:nim_max_rpm")
+    max_rpm = int(r_rpm) if r_rpm else int(os.getenv("NIM_MAX_RPM", "35"))
+
+    r_pref = await redis_client.get("llm:config:prefer_local")
+    prefer_local = (
+        True
+        if r_pref is None
+        else str(r_pref).lower() not in ("false", "0", "no")
+    )
+
+    minute_bucket = int(_time.time() // 60)
+    curr_rpm_raw = await redis_client.get(f"llm:nim:rpm:{minute_bucket}")
+    current_rpm = int(curr_rpm_raw) if curr_rpm_raw else 0
+
+    masked_key = None
+    if effective_key:
+        if len(effective_key) > 10:
+            masked_key = f"{effective_key[:6]}...{effective_key[-4:]}"
+        else:
+            masked_key = "***configured***"
+
+    cooldowns: Dict[str, str] = {}
+    stats: Dict[str, Any] = {}
+    try:
+        if hasattr(redis_client, "keys"):
+            cd_keys = await redis_client.keys("llm:cooldown:*")
+            for k in cd_keys:
+                val = await redis_client.get(k)
+                if val:
+                    cooldowns[k.replace("llm:cooldown:", "")] = val
+            st_keys = await redis_client.keys("llm:stats:*")
+            for k in st_keys:
+                val = await redis_client.get(k)
+                if val:
+                    try:
+                        stats[k.replace("llm:stats:", "")] = json.loads(val)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    return {
+        "strategy": (
+            "local_first_with_nim_failover"
+            if prefer_local
+            else "nim_first_with_local_failover"
+        ),
+        "prefer_local": prefer_local,
+        "nvidia_nim": {
+            "base_url": os.getenv(
+                "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
+            ),
+            "api_key_configured": bool(effective_key),
+            "api_key_masked": masked_key,
+            "default_model": default_nim_model,
+            "max_rpm": max_rpm,
+            "current_minute_rpm": current_rpm,
+            "free_tier_models": [
+                "meta/llama-3.3-70b-instruct",
+                "qwen/qwen2.5-coder-32b-instruct",
+                "deepseek-ai/deepseek-r1",
+                "mistralai/mistral-nemotron",
+                "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+            ],
+        },
+        "local_cluster": {
+            "ollama": {
+                "url": os.getenv(
+                    "LOCAL_OLLAMA_URL", "http://192.168.8.136:11434"
+                ),
+                "models": [
+                    "qwen2.5-coder:0.5b",
+                    "qwen2.5-coder:7b",
+                    "qwen3:8b",
+                    "qwen3:1.7b",
+                    "deepseek-coder-v2:16b-lite-instruct-q2_K",
+                    "phi4-mini-reasoning:latest",
+                    "gemma4:e2b",
+                ],
+            },
+            "ct118": [
+                {
+                    "url": "http://192.168.8.180:8080/v1",
+                    "model": "groot-19b",
+                    "provider": "openai",
+                },
+                {
+                    "url": "http://192.168.8.180:8081/v1",
+                    "model": "qwen3-4b",
+                    "provider": "openai",
+                },
+                {
+                    "url": "http://192.168.8.180:8090/v1",
+                    "model": "lfm3-1.7b",
+                    "provider": "openai",
+                },
+            ],
+            "laptop": [
+                {
+                    "url": "http://192.168.8.149:8080/v1",
+                    "model": "mistral-24b",
+                    "provider": "openai",
+                },
+                {
+                    "url": "http://192.168.8.149:8081/v1",
+                    "model": "qwen3-4b",
+                    "provider": "openai",
+                },
+                {
+                    "url": "http://192.168.8.149:8090/v1",
+                    "model": "lfm3-1.7b",
+                    "provider": "openai",
+                },
+            ],
+        },
+        "active_cooldowns": cooldowns,
+        "endpoint_telemetry": stats,
+    }
+
+
+@app.post("/api/v1/llm/config")
+async def update_llm_router_config(
+    payload: LLMRouterConfigRequest,
+) -> Dict[str, Any]:
+    redis_client = await get_redis()
+    if payload.nvidia_nim_api_key is not None:
+        await redis_client.set(
+            "llm:config:nim_api_key", payload.nvidia_nim_api_key.strip()
+        )
+    if payload.default_nim_model is not None:
+        await redis_client.set(
+            "llm:config:default_nim_model", payload.default_nim_model.strip()
+        )
+    if payload.nim_max_rpm is not None:
+        await redis_client.set(
+            "llm:config:nim_max_rpm", str(payload.nim_max_rpm)
+        )
+    if payload.prefer_local is not None:
+        await redis_client.set(
+            "llm:config:prefer_local",
+            "true" if payload.prefer_local else "false",
+        )
+    if payload.clear_cooldowns and hasattr(redis_client, "keys"):
+        cd_keys = await redis_client.keys("llm:cooldown:*")
+        for k in cd_keys:
+            await redis_client.delete(k)
+
+    return await get_llm_router_status()
 
 
 @app.websocket("/ws/blackboard")

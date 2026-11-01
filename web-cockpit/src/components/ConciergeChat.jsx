@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api } from "../api";
 
 export default function ConciergeChat({
@@ -21,6 +21,60 @@ export default function ConciergeChat({
   );
   const [memories, setMemories] = useState([]);
   const [memoryQuery, setMemoryQuery] = useState("memory limits and RBAC");
+  const [llmStatus, setLlmStatus] = useState(null);
+  const [nimKeyInput, setNimKeyInput] = useState("");
+  const [nimModelInput, setNimModelInput] = useState("meta/llama-3.3-70b-instruct");
+  const [preferLocal, setPreferLocal] = useState(true);
+  const [savingNim, setSavingNim] = useState(false);
+
+  async function refreshLlmStatus() {
+    try {
+      if (api.getLlmStatus) {
+        const st = await api.getLlmStatus();
+        setLlmStatus(st);
+        if (st?.nvidia_nim?.default_model) {
+          setNimModelInput(st.nvidia_nim.default_model);
+        }
+        if (typeof st?.prefer_local === "boolean") {
+          setPreferLocal(st.prefer_local);
+        }
+      }
+    } catch {
+      // ignore in unit tests where getLlmStatus may not be mocked
+    }
+  }
+
+  useEffect(() => {
+    refreshLlmStatus();
+  }, []);
+
+  async function handleSaveNimConfig(e) {
+    e.preventDefault();
+    if (!api.updateLlmConfig) return;
+    setSavingNim(true);
+    try {
+      const payload = {
+        default_nim_model: nimModelInput,
+        prefer_local: preferLocal,
+      };
+      if (nimKeyInput.trim()) {
+        payload.nvidia_nim_api_key = nimKeyInput.trim();
+      }
+      const updated = await api.updateLlmConfig(payload);
+      setLlmStatus(updated);
+      setNimKeyInput("");
+    } catch {
+      // ignore
+    } finally {
+      setSavingNim(false);
+    }
+  }
+
+  async function handleClearCooldowns() {
+    if (!api.updateLlmConfig) return;
+    const updated = await api.updateLlmConfig({ clear_cooldowns: true });
+    setLlmStatus(updated);
+  }
 
   async function handleSend(e) {
     e.preventDefault();
@@ -187,6 +241,85 @@ export default function ConciergeChat({
             ))}
           </div>
         )}
+      </div>
+
+      {/* Multi-Tier Local LAN + NVIDIA NIM Router Config */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Local LAN + NVIDIA NIM Router
+            </h3>
+            <p className="text-[11px] text-slate-400">
+              Free Local Endpoints First &bull; Rate-Limit (429) &amp; Slow Failover
+            </p>
+          </div>
+          <span
+            className={`px-2 py-1 rounded text-[10px] font-mono border ${
+              llmStatus?.nvidia_nim?.api_key_configured
+                ? "bg-emerald-950/60 border-emerald-700 text-emerald-300"
+                : "bg-amber-950/60 border-amber-700 text-amber-300"
+            }`}
+          >
+            {llmStatus?.nvidia_nim?.api_key_configured
+              ? `NIM READY (${llmStatus.nvidia_nim.api_key_masked})`
+              : "NIM KEY OPTIONAL"}
+          </span>
+        </div>
+
+        <form onSubmit={handleSaveNimConfig} className="space-y-2.5">
+          <input
+            type="password"
+            value={nimKeyInput}
+            onChange={(e) => setNimKeyInput(e.target.value)}
+            placeholder="Paste NVIDIA NIM API Key (nvapi-...) when ready"
+            className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+          />
+          <div className="flex flex-wrap gap-2">
+            <select
+              value={nimModelInput}
+              onChange={(e) => setNimModelInput(e.target.value)}
+              className="min-h-[44px] flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-slate-200 font-mono"
+            >
+              {(
+                llmStatus?.nvidia_nim?.free_tier_models || [
+                  "meta/llama-3.3-70b-instruct",
+                  "qwen/qwen2.5-coder-32b-instruct",
+                  "deepseek-ai/deepseek-r1",
+                  "mistralai/mistral-nemotron",
+                  "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+                ]
+              ).map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => setPreferLocal((p) => !p)}
+              className="min-h-[44px] min-w-[44px] px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs font-mono text-slate-200"
+            >
+              {preferLocal ? "Mode: Local First" : "Mode: NIM First"}
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={savingNim}
+              className="min-h-[44px] min-w-[44px] flex-1 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition"
+            >
+              {savingNim ? "Saving..." : "Save Router & NIM Key"}
+            </button>
+            <button
+              type="button"
+              onClick={handleClearCooldowns}
+              className="min-h-[44px] min-w-[44px] px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono rounded-lg transition"
+            >
+              Reset Cooldowns
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

@@ -28,7 +28,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 ├── .env.example                     # Environment template (LOCAL_OLLAMA_URL, DB pools, Redis)
 ├── pytest.ini                       # Pytest configuration
 ├── scripts/
-│   └── setup_lan_ufw.sh             # UFW firewall rules & LAN IP helper for mobile testing
+│   ├── setup_lan_ufw.sh             # UFW firewall rules & LAN IP helper for mobile testing
+│   └── run_live_llm_e2e.py          # Live multi-node LAN LLM E2E verification harness
 ├── workflows/
 │   └── code_review_pipeline.yaml    # Sample multi-agent pipeline (research->spec->code->test/review->HITL)
 ├── control-plane/
@@ -79,7 +80,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
         ├── test_memory_isolation.py
         ├── test_context_overflow.py
         ├── test_tool_rbac_bypass.py
-        └── test_zombie_lease_recovery.py
+        ├── test_zombie_lease_recovery.py
+        └── test_llm_router_resilience.py
 ```
 
 ---
@@ -92,3 +94,16 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 4. **Strict MCP RBAC (Falsifier 4):** `MCPToolboxGateway.enforce_rbac_and_invoke` MUST verify `tool_id in agent.allowed_tools`. Unauthorized calls raise `UnauthorizedToolException`, log a security critique to the Blackboard, and never reach the MCP transport.
 5. **Zombie Lease Recovery (Falsifier 5):** Abandoned tasks whose Redis lease TTL expires MUST be transitioned to `RETRY_QUEUED` by `WorkflowEngine.recover_abandoned_task` so healthy workers can re-claim and complete them.
 6. **Mobile-First Touch & LAN Compatibility:** All interactive buttons in `web-cockpit/` MUST maintain `min-h-[44px] min-w-[44px]` touch targets, use `dvh` viewport units for chat/drawers, and resolve API/WS URLs dynamically via `window.location.hostname` so mobile phones on the home Wi-Fi connect seamlessly.
+
+---
+
+## 4. Home LAN LLM Cluster & Default Agent Routing
+
+The control plane (`192.168.8.109`) orchestrates stateless workers across three LAN inference nodes:
+
+| Node | IP / Port | Provider | Models Available | Default Assigned Agent(s) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Ollama Server** | `http://192.168.8.136:11434` | `ollama` | `qwen2.5-coder:7b`, `qwen2.5-coder:0.5b`, `qwen3:8b`, `qwen3:1.7b`, `deepseek-coder-v2:16b-lite-instruct-q2_K`, `phi4-mini-reasoning:latest`, `gemma4:e2b` | `coder` (`qwen2.5-coder:0.5b` / `qwen2.5-coder:7b`) |
+| **CT118 (`llama.cpp`)** | `http://192.168.8.180:8080/v1`<br>`http://192.168.8.180:8081/v1`<br>`http://192.168.8.180:8090/v1` | `openai` | `:8080` -> `groot-19b`<br>`:8081` -> `qwen3-4b`<br>`:8090` -> `lfm3-1.7b` | `architect` (`qwen3-4b` on `:8081`)<br>`qa-tester` (`lfm3-1.7b` on `:8090`)<br>`sec-auditor` (`lfm3-1.7b` on `:8090`) |
+| **LAPTOP (`llama.cpp`)** | `http://192.168.8.149:8080/v1`<br>`http://192.168.8.149:8081/v1`<br>`http://192.168.8.149:8090/v1` | `openai` | `:8080` -> `mistral-24b`<br>`:8081` -> `qwen3-4b`<br>`:8090` -> `lfm3-1.7b` | Hot-swappable via `PUT /api/v1/agents/{id}` or Web Cockpit |
+| **NVIDIA NIM Free Cloud** | `https://integrate.api.nvidia.com/v1` | `nvidia_nim` | `meta/llama-3.3-70b-instruct`, `qwen/qwen2.5-coder-32b-instruct`, `deepseek-ai/deepseek-r1`, `mistralai/mistral-nemotron`, `nvidia/llama-3.1-nemotron-ultra-253b-v1` | Automatic escalation / fallback tier (`POST /api/v1/llm/config`, `llm:cooldown:*`, `llm:nim:rpm:*`) |

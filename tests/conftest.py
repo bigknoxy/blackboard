@@ -7,10 +7,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
-# Ensure control-plane and agent-worker are importable
+# Ensure control-plane and agent-worker are both importable under `app.*`
 ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR / "control-plane"))
-sys.path.insert(0, str(ROOT_DIR / "agent-worker"))
+for candidate_root in [
+    ROOT_DIR,
+    ROOT_DIR / "control-plane",
+    ROOT_DIR / "agent-worker",
+]:
+    if candidate_root.exists():
+        sys.path.insert(0, str(candidate_root))
+
+import app as _shared_app_pkg  # noqa: E402
+
+for sub_app in [
+    ROOT_DIR / "control-plane" / "app",
+    ROOT_DIR / "agent-worker" / "app",
+    ROOT_DIR / "app",
+]:
+    if sub_app.exists() and str(sub_app) not in _shared_app_pkg.__path__:
+        _shared_app_pkg.__path__.append(str(sub_app))
 
 
 class InMemoryAsyncRedis:

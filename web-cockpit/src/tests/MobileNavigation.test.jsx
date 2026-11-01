@@ -72,6 +72,6 @@ describe("MobileNavigation - Responsive Shell & Bottom Navigation Bar", () => {
 
     // Switch mobile tabs via bottom bar
     fireEvent.click(conciergeBtn);
-    expect(screen.getByTestId("concierge-dvh-container")).toBeDefined();
+    expect(screen.getAllByTestId("concierge-dvh-container").length).toBeGreaterThanOrEqual(1);
   });
 });

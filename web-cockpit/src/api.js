@@ -142,4 +142,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message, workflow_id: workflowId }),
     }),
+
+  // Multi-Tier LLM Router & NVIDIA NIM Gateway
+  getLlmStatus: () => request("/llm/status"),
+  updateLlmConfig: (payload) =>
+    request("/llm/config", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };

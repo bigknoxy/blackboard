@@ -11,6 +11,10 @@ class InferenceConfig(BaseModel):
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    timeout_seconds: Optional[float] = None
+    slow_threshold_seconds: Optional[float] = None
+    nim_model_name: Optional[str] = None
+    fallback_endpoints: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AgentCreate(BaseModel):
@@ -260,3 +264,12 @@ class ConciergeChatResponse(BaseModel):
     reply: str
     tool_calls_executed: List[Dict[str, Any]] = Field(default_factory=list)
     state_snapshot: Dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Multi-Tier LLM Router & NVIDIA NIM Config Schemas ---
+class LLMRouterConfigRequest(BaseModel):
+    nvidia_nim_api_key: Optional[str] = None
+    default_nim_model: Optional[str] = None
+    nim_max_rpm: Optional[int] = Field(default=None, ge=1, le=600)
+    prefer_local: Optional[bool] = None
+    clear_cooldowns: bool = False
