@@ -273,3 +273,20 @@ class LLMRouterConfigRequest(BaseModel):
     nim_max_rpm: Optional[int] = Field(default=None, ge=1, le=600)
     prefer_local: Optional[bool] = None
     clear_cooldowns: bool = False
+
+
+# --- External Chat Bridge Schemas (Telegram / Discord / Webhook) ---
+class ChannelConfigRequest(BaseModel):
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    telegram_enabled: Optional[bool] = None
+    discord_webhook_url: Optional[str] = None
+    discord_enabled: Optional[bool] = None
+
+
+class ChannelIncomingMessage(BaseModel):
+    channel: Literal["telegram", "discord", "webhook", "easy_chat"]
+    user_id: Optional[str] = None
+    sender_name: Optional[str] = None
+    message: str
+    workflow_id: Optional[str] = None

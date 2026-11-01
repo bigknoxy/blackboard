@@ -354,7 +354,7 @@ class ConciergeAdminAgent:
             )
             nim_model = (
                 await redis_client.get("llm:config:default_nim_model")
-                or os.getenv("NVIDIA_NIM_DEFAULT_MODEL", "meta/llama-3.3-70b-instruct")
+                or os.getenv("NVIDIA_NIM_DEFAULT_MODEL", "poolside/laguna-xs-2.1")
             )
             nim_base = os.getenv(
                 "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
