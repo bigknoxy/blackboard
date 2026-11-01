@@ -266,11 +266,15 @@ async def seed_initial_state() -> None:
         if local_wf_dir.exists():
             yaml_candidates.extend(local_wf_dir.glob("*.yaml"))
 
+        seen_wf_ids = set()
         for yaml_path in yaml_candidates:
             try:
                 raw_yaml = yaml_path.read_text(encoding="utf-8")
                 parsed = workflow_engine.parse_yaml_to_graph(raw_yaml)
                 wf_id = parsed["id"]
+                if wf_id in seen_wf_ids:
+                    continue
+                seen_wf_ids.add(wf_id)
                 existing_wf = await session.get(WorkflowModel, wf_id)
                 if not existing_wf:
                     state_graph = {
@@ -290,6 +294,7 @@ async def seed_initial_state() -> None:
                             bpmn_xml=bpmn_xml,
                         )
                     )
+                    await session.flush()
             except Exception as exc:
                 logger.warning(
                     "Failed loading workflow file %s: %s", yaml_path, exc

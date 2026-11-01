@@ -52,12 +52,20 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> None:
-    """Initialize PostgreSQL pgvector extension and create all tables."""
+    """Initialize PostgreSQL pgvector extension and create all tables with startup retry."""
+    import asyncio
     from app import models  # noqa: F401
 
-    async with engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        await conn.run_sync(Base.metadata.create_all)
+    for attempt in range(90):
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                await conn.run_sync(Base.metadata.create_all)
+            return
+        except Exception:
+            if attempt == 89:
+                raise
+            await asyncio.sleep(2.0)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
