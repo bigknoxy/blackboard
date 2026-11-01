@@ -47,3 +47,31 @@ docker compose exec -w /app control-plane pytest -v
 ```bash
 cd web-cockpit && npm install && npm test
 ```
+
+---
+
+## 4. Live LAN LLM Cluster & E2E Verification
+
+This stack is pre-configured to route agent turns across your LAN LLM cluster (`192.168.1.0/24`):
+- **Host / Cockpit / API (`192.168.1.100`)**:
+  - Mobile & Desktop Web Cockpit: `http://192.168.1.100:5173`
+  - FastAPI Control Plane & Swagger UI: `http://192.168.1.100:8000/docs`
+- **Ollama Node (`192.168.1.150:11434`)**: `qwen2.5-coder:0.5b`, `qwen2.5-coder:7b`, `qwen3:8b`, `qwen3:1.7b`, `deepseek-coder-v2:16b-lite-instruct-q2_K`, `phi4-mini-reasoning:latest`, `gemma4:e2b`
+- **CT118 Node (`192.168.1.180`)**: `:8080/v1` (`groot-19b`), `:8081/v1` (`qwen3-4b`), `:8090/v1` (`lfm3-1.7b`)
+- **LAPTOP Node (`192.168.1.149`)**: `:8080/v1` (`mistral-24b`), `:8081/v1` (`qwen3-4b`), `:8090/v1` (`lfm3-1.7b`)
+
+To run the live end-to-end multi-agent verification script against real LAN LLMs:
+```bash
+python3 scripts/run_live_llm_e2e.py
+```
+
+### NVIDIA NIM Free Tier + Local-First Router (`/api/v1/llm`)
+Workers prioritize your **free local LAN endpoints** (`CT118`, `Ollama`, `LAPTOP`) and automatically escalate or fail over to **NVIDIA NIM** (`https://integrate.api.nvidia.com/v1`) when slow endpoints time out, or fall back from NVIDIA NIM to local LAN when rate-limited (`HTTP 429` or `NIM_MAX_RPM`).
+
+Inject your NVIDIA NIM API key live at any time (no container restart needed):
+```bash
+curl -X POST http://192.168.1.100:8000/api/v1/llm/config \
+  -H "Content-Type: application/json" \
+  -d '{"nvidia_nim_api_key": "nvapi-YOUR_KEY_HERE", "prefer_local": true}'
+```
+Or paste it directly into the **Local LAN + NVIDIA NIM Router** card in the Web Cockpit (`http://192.168.1.100:5173` -> **Concierge** tab).

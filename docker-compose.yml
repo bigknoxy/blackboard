@@ -75,7 +75,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://blackboard:blackboard_secret@postgres:5432/blackboard_db}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      LOCAL_OLLAMA_URL: ${LOCAL_OLLAMA_URL:-http://192.168.1.100:11434}
+      LOCAL_OLLAMA_URL: ${LOCAL_OLLAMA_URL:-http://192.168.1.150:11434}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-qwen2.5-coder:7b}
       WORKFLOWS_DIR: /workflows
     ports:
       - "0.0.0.0:8000:8000"
@@ -112,7 +113,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://blackboard:blackboard_secret@postgres:5432/blackboard_db}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8000}
-      LOCAL_OLLAMA_URL: ${LOCAL_OLLAMA_URL:-http://192.168.1.100:11434}
+      LOCAL_OLLAMA_URL: ${LOCAL_OLLAMA_URL:-http://192.168.1.150:11434}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-qwen2.5-coder:7b}
     volumes:
       - ./agent-worker/app:/app/app
     depends_on:

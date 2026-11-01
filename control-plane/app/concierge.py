@@ -22,8 +22,12 @@ from app.workflow_engine import workflow_engine
 
 logger = logging.getLogger("blackboard.concierge")
 
-LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.100:11434")
-DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "qwen2.5-coder:14b")
+LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.150:11434")
+CONCIERGE_OPENAI_URL = os.getenv(
+    "CONCIERGE_OPENAI_URL", "http://192.168.1.180:8081/v1"
+)
+CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL", "qwen3-4b")
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "qwen2.5-coder:0.5b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "768"))
 
@@ -297,35 +301,85 @@ class ConciergeAdminAgent:
         system_prompt = (
             "You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane. "
             "Use the provided live platform state snapshot and executed meta-tool results "
-            "to answer the operator concisely."
+            "to answer the operator concisely in under 100 words."
         )
+        compact_summary = {
+            "agents": [a["id"] for a in snapshot.get("agents", [])],
+            "workflows": [w["id"] for w in snapshot.get("workflows", [])],
+            "pending_hitl_count": len(snapshot.get("pending_hitl", [])),
+            "total_memories": snapshot.get("total_memories", 0),
+        }
+        messages_payload = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"Operator request: {user_msg}\n"
+                    f"Executed meta-tools: {json.dumps(executed_tools)}\n"
+                    f"Live state summary: {json.dumps(compact_summary)}"
+                ),
+            },
+        ]
         try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httpx.AsyncClient(timeout=18.0) as client:
                 resp = await client.post(
-                    f"{LOCAL_OLLAMA_URL.rstrip('/')}/api/chat",
+                    f"{CONCIERGE_OPENAI_URL.rstrip('/')}/chat/completions",
                     json={
-                        "model": DEFAULT_LLM_MODEL,
-                        "stream": False,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"Operator request: {user_msg}\n\n"
-                                    f"Executed meta-tools: {json.dumps(executed_tools)}\n"
-                                    f"Live state: {json.dumps(snapshot)}"
-                                ),
-                            },
-                        ],
+                        "model": CONCIERGE_MODEL,
+                        "temperature": 0.2,
+                        "max_tokens": 160,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "messages": messages_payload,
                     },
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    content = (data.get("message") or {}).get("content")
-                    if content:
-                        return content.strip()
-        except Exception:
-            pass
+                    choices = data.get("choices") or []
+                    if choices:
+                        msg = choices[0].get("message") or {}
+                        content = msg.get("content") or msg.get("reasoning_content")
+                        if content:
+                            return content.strip()
+        except Exception as exc:
+            logger.warning("Concierge local LLM call failed (%s); checking NIM fallback.", exc)
+
+        # Fallback to NVIDIA NIM free endpoint if API key is configured
+        try:
+            from app.database import get_redis
+
+            redis_client = await get_redis()
+            nim_key = (
+                await redis_client.get("llm:config:nim_api_key")
+                or os.getenv("NVIDIA_NIM_API_KEY", "")
+            )
+            nim_model = (
+                await redis_client.get("llm:config:default_nim_model")
+                or os.getenv("NVIDIA_NIM_DEFAULT_MODEL", "meta/llama-3.3-70b-instruct")
+            )
+            nim_base = os.getenv(
+                "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
+            ).rstrip("/")
+            if nim_key:
+                async with httpx.AsyncClient(timeout=22.0) as client:
+                    resp = await client.post(
+                        f"{nim_base}/chat/completions",
+                        headers={"Authorization": f"Bearer {nim_key}"},
+                        json={
+                            "model": nim_model,
+                            "temperature": 0.2,
+                            "max_tokens": 160,
+                            "messages": messages_payload,
+                        },
+                    )
+                    if resp.status_code == 200:
+                        choices = resp.json().get("choices") or []
+                        if choices:
+                            msg = choices[0].get("message") or {}
+                            content = msg.get("content") or msg.get("reasoning_content")
+                            if content:
+                                return content.strip()
+        except Exception as exc:
+            logger.warning("Concierge NVIDIA NIM fallback failed: %s", exc)
         return None
 
     def _format_deterministic_reply(
