@@ -4,10 +4,11 @@ import BlackboardFeed from "./components/BlackboardFeed";
 import BpmnEditor from "./components/BpmnEditor";
 import HITLGates from "./components/HITLGates";
 import ConciergeChat from "./components/ConciergeChat";
+import UserGuide from "./components/UserGuide";
 
 export default function App() {
-  const [mobilePanel, setMobilePanel] = useState("board"); // board | workflows | approvals | concierge
-  const [desktopFocus, setDesktopFocus] = useState("split"); // split | board | workflows | approvals | concierge
+  const [mobilePanel, setMobilePanel] = useState("board"); // board | workflows | approvals | concierge | guide
+  const [desktopFocus, setDesktopFocus] = useState("split"); // split | board | workflows | approvals | concierge | guide
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [workflows, setWorkflows] = useState([]);
@@ -179,6 +180,7 @@ export default function App() {
                 { id: "workflows", label: "Focus BPMN" },
                 { id: "approvals", label: `Approvals (${pendingHitlCount})` },
                 { id: "concierge", label: "Concierge" },
+                { id: "guide", label: "User Guide" },
               ].map((mode) => (
                 <button
                   key={mode.id}
@@ -273,6 +275,7 @@ export default function App() {
                   onStateMutated={refreshAll}
                 />
               )}
+              {desktopFocus === "guide" && <UserGuide />}
             </div>
           )}
         </div>
@@ -315,6 +318,7 @@ export default function App() {
               onStateMutated={refreshAll}
             />
           )}
+          {mobilePanel === "guide" && <UserGuide />}
         </div>
       </main>
 
@@ -322,7 +326,7 @@ export default function App() {
       <nav
         data-testid="mobile-bottom-nav"
         aria-label="Mobile Primary Navigation"
-        className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 grid grid-cols-4 gap-1"
+        className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 grid grid-cols-5 gap-1"
       >
         <button
           data-testid="mobile-nav-board"
@@ -380,6 +384,18 @@ export default function App() {
           }`}
         >
           <span>Concierge</span>
+        </button>
+
+        <button
+          data-testid="mobile-nav-guide"
+          onClick={() => setMobilePanel("guide")}
+          className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
+            mobilePanel === "guide"
+              ? "bg-indigo-600 text-white"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <span>Guide</span>
         </button>
       </nav>
     </div>

@@ -39,6 +39,8 @@ from app.schemas import (
     BlackboardEntryResponse,
     ConciergeChatRequest,
     ConciergeChatResponse,
+    ChannelConfigRequest,
+    ChannelIncomingMessage,
     HITLDecisionRequest,
     HITLTicketResponse,
     LLMRouterConfigRequest,
@@ -1158,7 +1160,7 @@ async def get_llm_router_status() -> Dict[str, Any]:
 
     r_model = await redis_client.get("llm:config:default_nim_model")
     default_nim_model = r_model or os.getenv(
-        "NVIDIA_NIM_DEFAULT_MODEL", "meta/llama-3.3-70b-instruct"
+        "NVIDIA_NIM_DEFAULT_MODEL", "poolside/laguna-xs-2.1"
     )
     r_rpm = await redis_client.get("llm:config:nim_max_rpm")
     max_rpm = int(r_rpm) if r_rpm else int(os.getenv("NIM_MAX_RPM", "35"))
@@ -1175,11 +1177,52 @@ async def get_llm_router_status() -> Dict[str, Any]:
     current_rpm = int(curr_rpm_raw) if curr_rpm_raw else 0
 
     masked_key = None
+    nim_models_list = [
+        "poolside/laguna-xs-2.1",
+        "minimaxai/minimax-m3.1-flash",
+        "google/diffusiongemma-26b-a4b-it",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        "nvidia/riva-translate-4b-instruct-v2",
+        "meta/llama-guard-4-12b",
+    ]
     if effective_key:
         if len(effective_key) > 10:
             masked_key = f"{effective_key[:6]}...{effective_key[-4:]}"
         else:
             masked_key = "***configured***"
+        # Try fetching real-time model list from NVIDIA NIM /v1/models (cached for 1 hour in redis)
+        try:
+            cached_models_raw = await redis_client.get("llm:nim:models_cache")
+            if cached_models_raw:
+                nim_models_list = json.loads(cached_models_raw)
+            else:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    res = await client.get(
+                        f"{os.getenv('NVIDIA_NIM_BASE_URL', 'https://integrate.api.nvidia.com/v1').rstrip('/')}/models",
+                        headers={"Authorization": f"Bearer {effective_key}"},
+                    )
+                    if res.status_code == 200:
+                        live_data = res.json().get("data", [])
+                        live_ids = [m["id"] for m in live_data if "id" in m]
+                        if live_ids:
+                            # Prioritize confirmed active models first
+                            active_top = [
+                                "poolside/laguna-xs-2.1",
+                                "minimaxai/minimax-m3.1-flash",
+                                "google/diffusiongemma-26b-a4b-it",
+                                "nvidia/nemotron-3.5-lightning-30b-a3b",
+                                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                                "nvidia/riva-translate-4b-instruct-v2",
+                                "meta/llama-guard-4-12b",
+                            ]
+                            combined = active_top + [i for i in live_ids if i not in active_top]
+                            nim_models_list = combined
+                            await redis_client.setex(
+                                "llm:nim:models_cache", 3600, json.dumps(combined)
+                            )
+        except Exception as exc:
+            logger.debug("Failed to pull live NIM models list: %s", exc)
 
     cooldowns: Dict[str, str] = {}
     stats: Dict[str, Any] = {}
@@ -1217,13 +1260,7 @@ async def get_llm_router_status() -> Dict[str, Any]:
             "default_model": default_nim_model,
             "max_rpm": max_rpm,
             "current_minute_rpm": current_rpm,
-            "free_tier_models": [
-                "meta/llama-3.3-70b-instruct",
-                "qwen/qwen2.5-coder-32b-instruct",
-                "deepseek-ai/deepseek-r1",
-                "mistralai/mistral-nemotron",
-                "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-            ],
+            "free_tier_models": nim_models_list,
         },
         "local_cluster": {
             "ollama": {
@@ -1308,6 +1345,143 @@ async def update_llm_router_config(
             await redis_client.delete(k)
 
     return await get_llm_router_status()
+
+
+# ==============================================================================
+# 8. EXTERNAL CHAT CHANNELS GATEWAY (Telegram / Discord / Easy Webhook)
+# ==============================================================================
+@app.get("/api/v1/channels/status")
+async def get_channels_status() -> Dict[str, Any]:
+    redis_client = await get_redis()
+    tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    tg_chat_id = await redis_client.get("channel:telegram:chat_id") or os.getenv("TELEGRAM_CHAT_ID", "")
+    tg_enabled_raw = await redis_client.get("channel:telegram:enabled")
+    tg_enabled = (str(tg_enabled_raw).lower() in ("true", "1")) if tg_enabled_raw is not None else bool(tg_token and tg_chat_id)
+
+    dc_webhook = await redis_client.get("channel:discord:webhook") or os.getenv("DISCORD_WEBHOOK_URL", "")
+    dc_enabled_raw = await redis_client.get("channel:discord:enabled")
+    dc_enabled = (str(dc_enabled_raw).lower() in ("true", "1")) if dc_enabled_raw is not None else bool(dc_webhook)
+
+    return {
+        "telegram": {
+            "enabled": tg_enabled,
+            "configured": bool(tg_token and tg_chat_id),
+            "bot_token_masked": f"{tg_token[:5]}...{tg_token[-4:]}" if len(tg_token) > 10 else None,
+            "chat_id_masked": f"***{tg_chat_id[-4:]}" if len(tg_chat_id) > 4 else tg_chat_id or None,
+            "webhook_path": "/api/v1/channels/telegram/webhook",
+        },
+        "discord": {
+            "enabled": dc_enabled,
+            "configured": bool(dc_webhook),
+            "webhook_url_masked": f"{dc_webhook[:25]}...{dc_webhook[-6:]}" if len(dc_webhook) > 35 else None,
+            "inbound_path": "/api/v1/channels/message",
+        },
+        "easy_chat": {
+            "endpoint": "/api/v1/channels/message",
+            "supported_actions": ["steer: <directive>", "run workflow", "inspect state", "prune blackboard"],
+        },
+    }
+
+
+@app.post("/api/v1/channels/config")
+async def update_channels_config(payload: ChannelConfigRequest) -> Dict[str, Any]:
+    redis_client = await get_redis()
+    if payload.telegram_bot_token is not None:
+        await redis_client.set("channel:telegram:token", payload.telegram_bot_token.strip())
+    if payload.telegram_chat_id is not None:
+        await redis_client.set("channel:telegram:chat_id", payload.telegram_chat_id.strip())
+    if payload.telegram_enabled is not None:
+        await redis_client.set("channel:telegram:enabled", "true" if payload.telegram_enabled else "false")
+
+    if payload.discord_webhook_url is not None:
+        await redis_client.set("channel:discord:webhook", payload.discord_webhook_url.strip())
+    if payload.discord_enabled is not None:
+        await redis_client.set("channel:discord:enabled", "true" if payload.discord_enabled else "false")
+
+    return await get_channels_status()
+
+
+async def _notify_external_channels(text: str) -> None:
+    """Publish a notification out to Telegram or Discord if enabled."""
+    try:
+        redis_client = await get_redis()
+        # Discord Webhook Notification
+        dc_webhook = await redis_client.get("channel:discord:webhook") or os.getenv("DISCORD_WEBHOOK_URL", "")
+        dc_en = await redis_client.get("channel:discord:enabled")
+        if dc_webhook and str(dc_en).lower() in ("true", "1", "none"):
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(dc_webhook, json={"content": text[:1900]})
+        
+        # Telegram Bot Notification
+        tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        tg_chat_id = await redis_client.get("channel:telegram:chat_id") or os.getenv("TELEGRAM_CHAT_ID", "")
+        tg_en = await redis_client.get("channel:telegram:enabled")
+        if tg_token and tg_chat_id and str(tg_en).lower() in ("true", "1", "none"):
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                    json={"chat_id": tg_chat_id, "text": text[:4000], "parse_mode": "Markdown"},
+                )
+    except Exception as exc:
+        logger.warning("External channel notification failed: %s", exc)
+
+
+@app.post("/api/v1/channels/message")
+async def incoming_channel_message(
+    payload: ChannelIncomingMessage, session: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Unified inbound message endpoint for Telegram / Discord / Custom webhooks.
+    Executes Concierge meta-tools (steering, workflow triggers, pruning, state queries)
+    and broadcasts the result back.
+    """
+    concierge_res = await concierge_agent.handle_chat(
+        session,
+        ConciergeChatRequest(
+            message=payload.message,
+            workflow_id=payload.workflow_id or "code_review_pipeline",
+        ),
+    )
+
+    reply_text = f"**[Blackboard {payload.channel.upper()}]**\n{concierge_res.reply}"
+    asyncio.create_task(_notify_external_channels(reply_text))
+
+    return {
+        "channel": payload.channel,
+        "sender": payload.sender_name or "external_user",
+        "reply": concierge_res.reply,
+        "tool_calls_executed": concierge_res.tool_calls_executed,
+    }
+
+
+@app.post("/api/v1/channels/telegram/webhook")
+async def telegram_webhook_endpoint(
+    request_data: Dict[str, Any], session: AsyncSession = Depends(get_db)
+) -> Dict[str, str]:
+    """Standard Telegram Bot webhook receiver."""
+    message = request_data.get("message", {})
+    text = message.get("text", "")
+    from_user = message.get("from", {}).get("username") or str(message.get("from", {}).get("id", "user"))
+    chat_id = str(message.get("chat", {}).get("id", ""))
+
+    if text:
+        concierge_res = await concierge_agent.handle_chat(
+            session,
+            ConciergeChatRequest(message=text, workflow_id="code_review_pipeline"),
+        )
+        redis_client = await get_redis()
+        tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if tg_token and chat_id:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(
+                        f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                        json={"chat_id": chat_id, "text": concierge_res.reply[:4000]},
+                    )
+            except Exception as e:
+                logger.warning("Telegram reply failed: %s", e)
+
+    return {"status": "ok"}
 
 
 @app.websocket("/ws/blackboard")

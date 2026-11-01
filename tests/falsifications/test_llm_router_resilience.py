@@ -75,7 +75,8 @@ async def test_falsify_slow_local_endpoint_stalls_worker_and_fails_over_to_nim(
     )
 
     assert "Synthesized via NVIDIA NIM" in output
-    assert source.startswith("live:nvidia_nim:qwen/qwen2.5-coder-32b-instruct@https://integrate.api.nvidia.com/v1")
+    assert source.startswith("live:nvidia_nim:")
+    assert "integrate.api.nvidia.com" in source
 
     # Verify the slow local endpoint was placed into Redis cooldown so the next turn skips it immediately
     ollama_ep_key = runner._endpoint_key("ollama", "http://192.168.8.136:11434", "qwen2.5-coder:0.5b")

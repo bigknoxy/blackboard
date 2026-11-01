@@ -150,4 +150,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  // External Channels & Bridge
+  getChannelsStatus: () => request("/channels/status"),
+  updateChannelsConfig: (payload) =>
+    request("/channels/config", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  sendChannelMessage: (payload) =>
+    request("/channels/message", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 };

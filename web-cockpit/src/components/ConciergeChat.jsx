@@ -26,6 +26,22 @@ export default function ConciergeChat({
   const [nimModelInput, setNimModelInput] = useState("meta/llama-3.3-70b-instruct");
   const [preferLocal, setPreferLocal] = useState(true);
   const [savingNim, setSavingNim] = useState(false);
+  const [channelStatus, setChannelStatus] = useState(null);
+  const [tgTokenInput, setTgTokenInput] = useState("");
+  const [tgChatIdInput, setTgChatIdInput] = useState("");
+  const [dcWebhookInput, setDcWebhookInput] = useState("");
+  const [savingChannel, setSavingChannel] = useState(false);
+
+  async function refreshChannelStatus() {
+    try {
+      if (api.getChannelsStatus) {
+        const cs = await api.getChannelsStatus();
+        setChannelStatus(cs);
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   async function refreshLlmStatus() {
     try {
@@ -46,7 +62,31 @@ export default function ConciergeChat({
 
   useEffect(() => {
     refreshLlmStatus();
+    refreshChannelStatus();
   }, []);
+
+  async function handleSaveChannels(e) {
+    e.preventDefault();
+    if (!api.updateChannelsConfig) return;
+    setSavingChannel(true);
+    try {
+      const payload = {};
+      if (tgTokenInput.trim()) payload.telegram_bot_token = tgTokenInput.trim();
+      if (tgChatIdInput.trim()) payload.telegram_chat_id = tgChatIdInput.trim();
+      if (dcWebhookInput.trim()) payload.discord_webhook_url = dcWebhookInput.trim();
+      payload.telegram_enabled = true;
+      payload.discord_enabled = true;
+      const updated = await api.updateChannelsConfig(payload);
+      setChannelStatus(updated);
+      setTgTokenInput("");
+      setTgChatIdInput("");
+      setDcWebhookInput("");
+    } catch {
+      // ignore
+    } finally {
+      setSavingChannel(false);
+    }
+  }
 
   async function handleSaveNimConfig(e) {
     e.preventDefault();
@@ -319,6 +359,73 @@ export default function ConciergeChat({
               Reset Cooldowns
             </button>
           </div>
+        </form>
+      </div>
+
+      {/* External Channels Configuration (Telegram / Discord) */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-white">
+              Telegram &amp; Discord Channels Bridge
+            </h3>
+            <p className="text-[11px] text-slate-400">
+              Steer, trigger pipelines &amp; get alerts via Telegram or Discord
+            </p>
+          </div>
+          <div className="flex gap-1.5">
+            <span
+              className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                channelStatus?.telegram?.configured
+                  ? "bg-sky-950/60 border-sky-700 text-sky-300"
+                  : "bg-slate-950 border-slate-800 text-slate-500"
+              }`}
+            >
+              TG: {channelStatus?.telegram?.configured ? "ACTIVE" : "OFF"}
+            </span>
+            <span
+              className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                channelStatus?.discord?.configured
+                  ? "bg-indigo-950/60 border-indigo-700 text-indigo-300"
+                  : "bg-slate-950 border-slate-800 text-slate-500"
+              }`}
+            >
+              DC: {channelStatus?.discord?.configured ? "ACTIVE" : "OFF"}
+            </span>
+          </div>
+        </div>
+
+        <form onSubmit={handleSaveChannels} className="space-y-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <input
+              type="password"
+              value={tgTokenInput}
+              onChange={(e) => setTgTokenInput(e.target.value)}
+              placeholder="Telegram Bot Token (from @BotFather)"
+              className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+            />
+            <input
+              type="text"
+              value={tgChatIdInput}
+              onChange={(e) => setTgChatIdInput(e.target.value)}
+              placeholder="Telegram Chat ID (e.g. 123456789)"
+              className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+            />
+          </div>
+          <input
+            type="password"
+            value={dcWebhookInput}
+            onChange={(e) => setDcWebhookInput(e.target.value)}
+            placeholder="Discord Webhook URL (https://discord.com/api/webhooks/...)"
+            className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+          />
+          <button
+            type="submit"
+            disabled={savingChannel}
+            className="min-h-[44px] w-full px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-semibold rounded-lg transition"
+          >
+            {savingChannel ? "Saving Channels..." : "Save External Channels Config"}
+          </button>
         </form>
       </div>
     </div>

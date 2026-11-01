@@ -26,7 +26,7 @@ NVIDIA_NIM_BASE_URL = os.getenv(
 ).rstrip("/")
 NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY", "")
 NVIDIA_NIM_DEFAULT_MODEL = os.getenv(
-    "NVIDIA_NIM_DEFAULT_MODEL", "meta/llama-3.3-70b-instruct"
+    "NVIDIA_NIM_DEFAULT_MODEL", "poolside/laguna-xs-2.1"
 )
 NIM_MAX_RPM = int(os.getenv("NIM_MAX_RPM", "35"))
 OPENAI_BASE_URL = os.getenv(
@@ -43,17 +43,17 @@ REDIS_EVENTS_CHANNEL = os.getenv(
     "REDIS_EVENTS_CHANNEL", "channel:blackboard:events"
 )
 
-# Role-optimized free NVIDIA NIM catalog models
+# Verified active NVIDIA NIM catalog models
 NIM_ROLE_MODELS: Dict[str, str] = {
-    "coder": "qwen/qwen2.5-coder-32b-instruct",
-    "code": "qwen/qwen2.5-coder-32b-instruct",
-    "architect": "meta/llama-3.3-70b-instruct",
-    "hypothesis": "meta/llama-3.3-70b-instruct",
-    "spec": "meta/llama-3.3-70b-instruct",
-    "sec-auditor": "meta/llama-3.3-70b-instruct",
-    "critique": "meta/llama-3.3-70b-instruct",
-    "qa-tester": "meta/llama-3.3-70b-instruct",
-    "test_result": "meta/llama-3.3-70b-instruct",
+    "coder": "poolside/laguna-xs-2.1",
+    "code": "poolside/laguna-xs-2.1",
+    "architect": "poolside/laguna-xs-2.1",
+    "hypothesis": "poolside/laguna-xs-2.1",
+    "spec": "poolside/laguna-xs-2.1",
+    "sec-auditor": "minimaxai/minimax-m3.1-flash",
+    "critique": "minimaxai/minimax-m3.1-flash",
+    "qa-tester": "poolside/laguna-xs-2.1",
+    "test_result": "poolside/laguna-xs-2.1",
 }
 
 
