@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 import httpx
 import pytest
 
-from app.runner import StatelessAgentRunner
+from app.runner import FAST_LOCAL_FALLBACK_URL, StatelessAgentRunner
 
 
 class MockHTTPClient:
@@ -38,7 +38,7 @@ async def test_falsify_slow_local_endpoint_stalls_worker_and_fails_over_to_nim(
     async def simulate_slow_local_then_fast_nim(url, payload, headers, timeout):
         if "192.168.1.150:11434" in url:
             raise httpx.ReadTimeout("Simulated slow CPU Ollama timeout")
-        if "192.168.1.180:8081" in url:
+        if FAST_LOCAL_FALLBACK_URL in url or ":8081" in url:
             raise httpx.ConnectTimeout("Simulated local node busy")
         if "integrate.api.nvidia.com" in url:
             assert headers.get("Authorization") == "Bearer nvapi-test-live-key-123456"
@@ -119,7 +119,7 @@ async def test_falsify_nvidia_nim_429_rate_limit_drops_task_instead_of_using_loc
                 headers={"Retry-After": "45"},
                 json={"error": "Rate limit exceeded (40 RPM free tier)"},
             )
-        if "192.168.1.180:8081" in url:
+        if FAST_LOCAL_FALLBACK_URL in url or ":8081" in url:
             return httpx.Response(
                 200,
                 json={
@@ -152,7 +152,7 @@ async def test_falsify_nvidia_nim_429_rate_limit_drops_task_instead_of_using_loc
     )
 
     assert "Verified locally via CT118 qwen3-4b after NIM 429!" in output
-    assert source == "live:openai:qwen3-4b@http://192.168.1.180:8081/v1"
+    assert source == f"live:openai:qwen3-4b@{FAST_LOCAL_FALLBACK_URL}"
 
     nim_ep_key = runner._endpoint_key(
         "nvidia_nim", "https://integrate.api.nvidia.com/v1", "meta/llama-3.3-70b-instruct"
@@ -203,4 +203,4 @@ async def test_proactive_nim_rpm_token_bucket_routes_overflow_to_local_lan(
     )
 
     assert output == "Handled by free local LAN endpoint"
-    assert source == "live:openai:qwen3-4b@http://192.168.1.180:8081/v1"
+    assert source == f"live:openai:qwen3-4b@{FAST_LOCAL_FALLBACK_URL}"

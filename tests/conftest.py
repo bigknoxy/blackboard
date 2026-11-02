@@ -140,3 +140,27 @@ class InMemoryAsyncRedis:
 @pytest.fixture
 def fake_redis() -> InMemoryAsyncRedis:
     return InMemoryAsyncRedis()
+
+
+@pytest.fixture
+async def db_session():
+    import os
+    from sqlalchemy.pool import NullPool
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    db_url = os.getenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://blackboard:blackboard_secret@postgres:5432/blackboard_db",
+    )
+    test_engine = create_async_engine(db_url, poolclass=NullPool)
+    session_factory = async_sessionmaker(
+        bind=test_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    async with session_factory() as session:
+        yield session
+    await test_engine.dispose()
+

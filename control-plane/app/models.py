@@ -144,6 +144,66 @@ class BlackboardEntryModel(Base):
     )
 
 
+class BlackboardNodeModel(Base):
+    __tablename__ = "blackboard_nodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    task_id: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    author_agent_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, index=True
+    )
+    node_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )  # hypothesis | spec | code | critique | steering | test_result | summary
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active", index=True
+    )  # active | superseded | falsified
+    payload: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_blackboard_nodes_wf_status", "workflow_id", "status"),
+        Index("ix_blackboard_nodes_created", "workflow_id", "created_at"),
+    )
+
+
+class BlackboardEdgeModel(Base):
+    __tablename__ = "blackboard_edges"
+
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("blackboard_nodes.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    target_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("blackboard_nodes.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    relation_type: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default="implements"
+    )  # implements | critiques | revises | verifies | steers | summarizes
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_blackboard_edges_target", "target_id", "relation_type"),
+    )
+
+
+
 class WorkflowModel(Base):
     __tablename__ = "workflows"
 

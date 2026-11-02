@@ -22,12 +22,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.concierge import compute_embedding, concierge_agent
 from app.database import AsyncSessionLocal, get_db, get_redis, init_db
+from app.graph import BlackboardGraphEngine, GraphCycleException
 from app.mcp_gateway import mcp_gateway
 from app.models import (
     AgentMemoryModel,
     AgentModel,
     BacklogItemModel,
+    BlackboardEdgeModel,
     BlackboardEntryModel,
+    BlackboardNodeModel,
     HITLTicketModel,
     MCPToolModel,
     WorkflowModel,
@@ -40,8 +43,13 @@ from app.schemas import (
     BacklogItemCreate,
     BacklogItemResponse,
     BacklogItemUpdate,
+    BlackboardEdgeCreate,
+    BlackboardEdgeResponse,
     BlackboardEntryCreate,
     BlackboardEntryResponse,
+    BlackboardGraphResponse,
+    BlackboardNodeCreate,
+    BlackboardNodeResponse,
     ConciergeChatRequest,
     ConciergeChatResponse,
     ChannelConfigRequest,
@@ -56,6 +64,7 @@ from app.schemas import (
     MemoryResponse,
     MemorySearchRequest,
     SteeringCreate,
+    ToolChainResponse,
     ToolInvokeRequest,
     ToolInvokeResponse,
     WorkflowCreate,
@@ -74,6 +83,7 @@ logger = logging.getLogger("blackboard.main")
 
 LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.150:11434")
 WORKFLOWS_DIR = Path(os.getenv("WORKFLOWS_DIR", "/workflows"))
+graph_engine = BlackboardGraphEngine()
 
 
 class WebSocketManager:
@@ -980,6 +990,38 @@ async def create_blackboard_entry(
         }
     )
 
+    # Also mirror into DAG blackboard_nodes
+    try:
+        latest_nodes = await session.execute(
+            select(BlackboardNodeModel.id)
+            .where(BlackboardNodeModel.workflow_id == payload.workflow_id)
+            .order_by(BlackboardNodeModel.created_at.desc())
+            .limit(1)
+        )
+        prev_node_id = latest_nodes.scalar_one_or_none()
+        relation = (
+            "implements"
+            if payload.entry_type == "code"
+            else (
+                "critiques"
+                if payload.entry_type == "critique"
+                else "steers" if payload.entry_type == "steering" else "implements"
+            )
+        )
+        await graph_engine.create_node(
+            session=session,
+            workflow_id=payload.workflow_id,
+            author_agent_id=payload.agent_id,
+            node_type=payload.entry_type,
+            payload={"content": payload.content, **payload.metadata},
+            task_id=payload.task_id,
+            parent_node_id=prev_node_id,
+            relation_type=relation,
+        )
+        await session.commit()
+    except Exception as exc:
+        logger.warning(f"DAG mirror notice: {exc}")
+
     # Trigger automated state pruning if debate exceeds threshold
     await workflow_engine.prune_and_summarize_blackboard(
         session, payload.workflow_id
@@ -1047,6 +1089,115 @@ async def prune_blackboard_endpoint(
         "summary_entry_id": str(summary.id),
         "summary_content": summary.content,
     }
+
+
+# --- BLACKBOARD ADJACENCY DAG & TOPOLOGICAL LINEAGE ENDPOINTS ---
+@app.post(
+    "/api/v1/blackboard/nodes",
+    response_model=BlackboardNodeResponse,
+    status_code=201,
+)
+async def create_blackboard_node(
+    payload: BlackboardNodeCreate, session: AsyncSession = Depends(get_db)
+) -> BlackboardNodeModel:
+    try:
+        node = await graph_engine.create_node(
+            session=session,
+            workflow_id=payload.workflow_id,
+            author_agent_id=payload.author_agent_id,
+            node_type=payload.node_type,
+            payload=payload.payload,
+            task_id=payload.task_id,
+            status=payload.status,
+            parent_node_id=payload.parent_node_id,
+            relation_type=payload.relation_type,
+        )
+        await session.commit()
+        await session.refresh(node)
+
+        await workflow_engine._publish_event(
+            {
+                "event": "blackboard.node_created",
+                "id": str(node.id),
+                "workflow_id": node.workflow_id,
+                "node_type": node.node_type,
+                "author_agent_id": node.author_agent_id,
+                "status": node.status,
+            }
+        )
+        return node
+    except GraphCycleException as exc:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post(
+    "/api/v1/blackboard/edges",
+    response_model=BlackboardEdgeResponse,
+    status_code=201,
+)
+async def create_blackboard_edge(
+    payload: BlackboardEdgeCreate, session: AsyncSession = Depends(get_db)
+) -> BlackboardEdgeModel:
+    try:
+        edge = await graph_engine.add_edge(
+            session=session,
+            source_id=payload.source_id,
+            target_id=payload.target_id,
+            relation_type=payload.relation_type,
+        )
+        await session.commit()
+        return edge
+    except GraphCycleException as exc:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get(
+    "/api/v1/blackboard/graph/{workflow_id}",
+    response_model=BlackboardGraphResponse,
+)
+async def get_blackboard_graph(
+    workflow_id: str, session: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    graph_data = await graph_engine.get_full_graph(session, workflow_id)
+    lineage = await graph_engine.get_active_lineage(session, workflow_id)
+    return {
+        "workflow_id": workflow_id,
+        "nodes": graph_data["nodes"],
+        "edges": graph_data["edges"],
+        "active_lineage": lineage,
+    }
+
+
+@app.get(
+    "/api/v1/blackboard/lineage/{node_id}",
+    response_model=List[BlackboardNodeResponse],
+)
+async def get_node_lineage(
+    node_id: uuid.UUID, session: AsyncSession = Depends(get_db)
+) -> List[BlackboardNodeModel]:
+    node = await session.get(BlackboardNodeModel, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return await graph_engine.get_active_lineage(
+        session, node.workflow_id, leaf_node_id=node.id
+    )
+
+
+@app.get("/api/v1/mcp/tool-chain", response_model=ToolChainResponse)
+async def resolve_mcp_tool_chain(
+    source_type: str = Query(...),
+    target_type: str = Query(...),
+) -> Dict[str, Any]:
+    chain = mcp_gateway.resolve_tool_chain(source_type, target_type)
+    return {
+        "source_type": source_type,
+        "target_type": target_type,
+        "tool_chain": chain,
+        "resolved": chain is not None,
+    }
+
 
 
 @app.post("/api/v1/blackboard/task-complete")

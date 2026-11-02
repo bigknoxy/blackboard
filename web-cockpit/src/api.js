@@ -190,4 +190,18 @@ export const api = {
     request(`/backlog/${id}/intake`, { method: "POST" }),
   getBacklogArtifacts: (id) =>
     request(`/backlog/${id}/artifacts`),
+
+  // Adjacency DAG & Lineage Pruning
+  getBlackboardGraph: (workflowId) =>
+    request(`/blackboard/graph/${encodeURIComponent(workflowId)}`),
+  getNodeLineage: (nodeId) =>
+    request(`/blackboard/lineage/${nodeId}`),
+  createBlackboardNode: (payload) =>
+    request("/blackboard/nodes", { method: "POST", body: JSON.stringify(payload) }),
+  resolveToolChain: (sourceType, targetType) =>
+    request(
+      `/mcp/tool-chain?source_type=${encodeURIComponent(
+        sourceType
+      )}&target_type=${encodeURIComponent(targetType)}`
+    ),
 };

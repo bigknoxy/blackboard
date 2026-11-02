@@ -153,6 +153,67 @@ class SteeringCreate(BaseModel):
     target_agent_id: Optional[str] = None
 
 
+# --- Blackboard DAG & Lineage Schemas ---
+NodeStatusLiteral = Literal["active", "superseded", "falsified"]
+EdgeRelationLiteral = Literal[
+    "implements", "critiques", "revises", "verifies", "steers", "summarizes"
+]
+
+
+class BlackboardNodeCreate(BaseModel):
+    workflow_id: str
+    task_id: Optional[str] = None
+    author_agent_id: str
+    node_type: EntryTypeLiteral
+    status: NodeStatusLiteral = "active"
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    parent_node_id: Optional[uuid.UUID] = None
+    relation_type: EdgeRelationLiteral = "implements"
+
+
+class BlackboardEdgeCreate(BaseModel):
+    source_id: uuid.UUID
+    target_id: uuid.UUID
+    relation_type: EdgeRelationLiteral = "implements"
+
+
+class BlackboardNodeResponse(BaseModel):
+    id: uuid.UUID
+    workflow_id: str
+    task_id: Optional[str] = None
+    author_agent_id: str
+    node_type: str
+    status: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class BlackboardEdgeResponse(BaseModel):
+    source_id: uuid.UUID
+    target_id: uuid.UUID
+    relation_type: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class BlackboardGraphResponse(BaseModel):
+    workflow_id: str
+    nodes: List[BlackboardNodeResponse]
+    edges: List[BlackboardEdgeResponse]
+    active_lineage: List[BlackboardNodeResponse] = Field(default_factory=list)
+
+
+class ToolChainResponse(BaseModel):
+    source_type: str
+    target_type: str
+    tool_chain: Optional[List[str]] = None
+    resolved: bool
+
+
+
 # --- Workflow & BPMN Schemas ---
 class WorkflowNode(BaseModel):
     id: str

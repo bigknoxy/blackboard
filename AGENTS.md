@@ -12,9 +12,10 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 3. **Centralized MCP Toolbox Gateway (`control-plane/app/mcp_gateway.py`):** Wraps stdio/SSE/HTTP/builtin Model Context Protocol (MCP) tools, enforces strict per-agent RBAC (`allowed_tools`), and halts execution when `requires_approval: true` by queueing a ticket in `hitl_tickets`.
 4. **Shared Blackboard System (Redis Streams + PostgreSQL):**
    - **Active Plane (Redis):** `stream:tasks` (`XREADGROUP` consumer group `agent_worker_pool`), atomic distributed task leases (`SET task:{id}:lease {worker_id} NX EX 60`), and live Pub/Sub (`channel:blackboard:events`).
-   - **Audit Plane (PostgreSQL):** `blackboard_entries` (`hypothesis`, `critique`, `spec`, `code`, `test_result`, `steering`, `summary`) with automated debate pruning (`build_bounded_context` & `prune_and_summarize_blackboard`).
-5. **Dual Workflow Engine (`control-plane/app/workflow_engine.py`):** Bi-directional conversion between YAML/JSON state graphs and BPMN 2.0 XML (`ServiceTask`, `ParallelGateway`, `ExclusiveGateway`, `UserTask`).
-6. **Mobile-First Web Cockpit (`web-cockpit/`):** Touch-friendly ($\ge 44\times 44\text{px}$) React + Tailwind + Vite UI with LAN auto-discovery (`window.location.hostname`), `100dvh` mobile layout, bottom nav bar, windowed pagination, `bpmn-js` pinch-to-zoom + timeline fallback, and HITL confirmation modal.
+   - **Audit Plane (PostgreSQL):** `blackboard_entries` and **Adjacency DAG (`blackboard_nodes`, `blackboard_edges`)** with topological context building and causal lineage pruning (`get_active_lineage`).
+5. **Tool Capability Graph (`control-plane/app/mcp_gateway.py`):** Tools declare `consumes_type` and `produces_type`; `resolve_tool_chain` deterministically finds shortest composition paths for workers.
+6. **Dual Workflow Engine (`control-plane/app/workflow_engine.py`):** Bi-directional conversion between YAML/JSON state graphs and BPMN 2.0 XML (`ServiceTask`, `ParallelGateway`, `ExclusiveGateway`, `UserTask`).
+7. **Mobile-First Web Cockpit (`web-cockpit/`):** Touch-friendly ($\ge 44\times 44\text{px}$) React + Tailwind + Vite UI with LAN auto-discovery (`window.location.hostname`), `100dvh` mobile layout, interactive DAG graph canvas (`BlackboardGraphCanvas`), bottom nav bar, windowed pagination, `bpmn-js` pinch-to-zoom + timeline fallback, and HITL confirmation modal.
 
 ---
 
@@ -40,7 +41,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 │       ├── database.py              # Async SQLAlchemy engine, pgvector init, Redis pool
 │       ├── models.py                # SQLAlchemy ORM models
 │       ├── schemas.py               # Pydantic v2 request/response schemas
-│       ├── mcp_gateway.py           # MCP multiplexer, RBAC enforcement & HITL ticket router
+│       ├── graph.py                 # Blackboard DAG engine, lineage pruning, cycle detection
+│       ├── mcp_gateway.py           # MCP multiplexer, RBAC enforcement, tool chain pathfinder & HITL router
 │       ├── workflow_engine.py       # YAML <-> BPMN 2.0 converter, state machine, pruning & zombie recovery
 │       └── concierge.py             # Concierge Admin Agent (/api/v1/chat) & embedding helper
 ├── agent-worker/
@@ -58,12 +60,14 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 │       ├── App.jsx                  # Responsive shell (Desktop 3-col split / Mobile bottom nav)
 │       ├── api.js                   # Dynamic LAN-aware REST & WebSocket client
 │       ├── components/
-│       │   ├── BlackboardFeed.jsx   # Sticky filter tags, >=44px targets, 20-item windowed pagination
+│       │   ├── BlackboardFeed.jsx   # Sticky filter tags, DAG view toggle, >=44px targets, windowed feed
+│       │   ├── BlackboardGraphCanvas.jsx # Interactive DAG lineage canvas, active path highlight, tool chain resolver
 │       │   ├── BpmnEditor.jsx       # bpmn-js touch canvas + mobile Step-List/Timeline fallback
 │       │   ├── HITLGates.jsx        # Thumb-accessible Approve/Reject drawer + confirmation modal
 │       │   └── ConciergeChat.jsx    # dvh keyboard-aware chat + scoped pgvector inspector
 │       └── tests/
 │           ├── BlackboardFeed.test.jsx
+│           ├── BlackboardGraphCanvas.test.jsx
 │           ├── MobileNavigation.test.jsx
 │           └── HITLApprovalDrawer.test.jsx
 └── tests/
@@ -81,7 +85,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
         ├── test_context_overflow.py
         ├── test_tool_rbac_bypass.py
         ├── test_zombie_lease_recovery.py
-        └── test_llm_router_resilience.py
+        ├── test_llm_router_resilience.py
+        └── test_blackboard_dag_engineering.py
 ```
 
 ---
@@ -94,6 +99,10 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 4. **Strict MCP RBAC (Falsifier 4):** `MCPToolboxGateway.enforce_rbac_and_invoke` MUST verify `tool_id in agent.allowed_tools`. Unauthorized calls raise `UnauthorizedToolException`, log a security critique to the Blackboard, and never reach the MCP transport.
 5. **Zombie Lease Recovery (Falsifier 5):** Abandoned tasks whose Redis lease TTL expires MUST be transitioned to `RETRY_QUEUED` by `WorkflowEngine.recover_abandoned_task` so healthy workers can re-claim and complete them.
 6. **Mobile-First Touch & LAN Compatibility:** All interactive buttons in `web-cockpit/` MUST maintain `min-h-[44px] min-w-[44px]` touch targets, use `dvh` viewport units for chat/drawers, and resolve API/WS URLs dynamically via `window.location.hostname` so mobile phones on the home Wi-Fi connect seamlessly.
+7. **Autonomous Intake & Lineage Gate (Falsifier 7):** Work items initiated via `/api/v1/intake` MUST deterministically progress through backlog staging, artifact pre-generation, and board activation.
+8. **Acyclic Blackboard DAG Invariant (Falsifier 8):** Edges in `blackboard_edges` MUST strictly form a Directed Acyclic Graph (DAG). Any edge creation introducing a cycle MUST raise `GraphCycleException` and abort atomically.
+9. **Causal Lineage Pruning (Falsifier 9):** `BlackboardGraphEngine.get_active_lineage` and `build_topological_context` MUST prune superseded nodes and resolved critiques while retaining the root spec, preventing context inflation and worker hallucination.
+10. **Deterministic Tool Chain Pathfinding (Falsifier 10):** `MCPToolboxGateway.resolve_tool_chain` MUST deterministically compute the shortest valid tool composition path using tool `consumes_type` and `produces_type` contracts without model trial-and-error.
 
 ---
 
