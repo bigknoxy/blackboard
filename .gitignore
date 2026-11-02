@@ -6,16 +6,23 @@ __pycache__/
 venv/
 .pytest_cache/
 .coverage
+coverage/
+*.log
 
 # Node / Frontend
 node_modules/
 web-cockpit/node_modules/
 web-cockpit/dist/
+.vite/
 
 # Environment & Local Secrets
 .env
-.env.local
+.env.*
+!.env.example
 
-# OS / Editor
+# OS / Editor / Artifacts
 .DS_Store
 *.swp
+*.swo
+*.png
+

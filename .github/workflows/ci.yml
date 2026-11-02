@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test:
+    name: Backend Tests & Falsifiers (Python 3.11)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: blackboard
+          POSTGRES_PASSWORD: blackboard_secret
+          POSTGRES_DB: blackboard_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://blackboard:blackboard_secret@localhost:5432/blackboard_db
+      SYNC_DATABASE_URL: postgresql+psycopg://blackboard:blackboard_secret@localhost:5432/blackboard_db
+      REDIS_URL: redis://localhost:6379/0
+      DEFAULT_LLM_PROVIDER: ollama
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r control-plane/requirements.txt
+          pip install -r agent-worker/requirements.txt
+
+      - name: Initialize Database Schema
+        run: |
+          python -c "import asyncio, sys; sys.path.insert(0, 'control-plane'); from app.database import init_db; asyncio.run(init_db())"
+
+      - name: Run Pytest Suite & Popperian Falsifiers
+        run: |
+          pytest -v
+
+  frontend-test:
+    name: Frontend Tests & Production Build (Node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-cockpit
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: web-cockpit/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run Vitest Suite
+        run: npm test
+
+      - name: Build Web Cockpit
+        run: npm run build
