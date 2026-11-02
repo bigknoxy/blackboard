@@ -75,3 +75,22 @@ curl -X POST http://192.168.1.100:8000/api/v1/llm/config \
   -d '{"nvidia_nim_api_key": "nvapi-YOUR_KEY_HERE", "prefer_local": true}'
 ```
 Or paste it directly into the **Local LAN + NVIDIA NIM Router** card in the Web Cockpit (`http://192.168.1.100:5173` -> **Concierge** tab).
+
+---
+
+## 5. Blackboard Graph Engineering & Lineage Pruning (PostgreSQL DAG)
+
+To eliminate context window explosion and LLM hallucinations in complex multi-round agent debates, the system features a topological Adjacency Graph architecture:
+
+- **Adjacency Schema:**
+  - `blackboard_nodes`: Typed nodes (`hypothesis`, `critique`, `spec`, `code`, `test_result`, `summary`, etc.) with statuses (`active`, `superseded`, `falsified`).
+  - `blackboard_edges`: Directed edges (`references`, `critiques`, `revises`, `verifies`, `derives`) enforcing strict DAG topology (Falsifier 8).
+- **Causal Lineage Pruning (`control-plane/app/graph.py`):**
+  - Walks active ancestor paths while automatically pruning rejected code and superseded critiques (Falsifier 9).
+  - Formats the filtered active ancestor path into structured `<context_lineage>` prompt blocks for worker persona hydration.
+- **Tool Capability Graph (`control-plane/app/mcp_gateway.py`):**
+  - MCP tools declare typed input/output contracts (`consumes_type`, `produces_type`).
+  - `resolve_tool_chain(source_type, target_type)` deterministically calculates shortest execution paths via BFS, allowing smaller models to chain tools without multi-turn trial and error (Falsifier 10).
+- **Web Cockpit DAG Canvas (`web-cockpit/src/components/BlackboardGraphCanvas.jsx`):**
+  - Interactive DAG visualizer displaying live nodes, relationship edges, active path highlighting, and superseded node dimming.
+  - Interactive tool chain resolver UI allowing operators to preview deterministic tool paths directly from the Cockpit.

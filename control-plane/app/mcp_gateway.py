@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,6 +92,8 @@ class MCPToolboxGateway:
                 "server_name": "workspace-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.workspace"},
+                "consumes_type": "query_keyword",
+                "produces_type": "code_snippet",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -115,6 +117,8 @@ class MCPToolboxGateway:
                 "server_name": "code-intel-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.ast"},
+                "consumes_type": "code_snippet",
+                "produces_type": "ast_report",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -134,6 +138,8 @@ class MCPToolboxGateway:
                 "server_name": "secops-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.secops"},
+                "consumes_type": "ast_report",
+                "produces_type": "security_audit_report",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -157,6 +163,8 @@ class MCPToolboxGateway:
                 "server_name": "qa-sandbox-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.pytest"},
+                "consumes_type": "test_suite",
+                "produces_type": "test_results",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -176,6 +184,8 @@ class MCPToolboxGateway:
                 "server_name": "git-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.git"},
+                "consumes_type": "verified_artifact",
+                "produces_type": "git_commit_sha",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -194,6 +204,8 @@ class MCPToolboxGateway:
                 "server_name": "deploy-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.deploy"},
+                "consumes_type": "git_commit_sha",
+                "produces_type": "release_deployment",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -211,6 +223,8 @@ class MCPToolboxGateway:
                 "server_name": "meta-arch-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.workflow_validator"},
+                "consumes_type": "yaml_workflow_spec",
+                "produces_type": "validated_workflow_ast",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -229,6 +243,8 @@ class MCPToolboxGateway:
                 "server_name": "meta-arch-mcp",
                 "transport": "builtin",
                 "endpoint_config": {"module": "builtin.workflow_activator"},
+                "consumes_type": "validated_workflow_ast",
+                "produces_type": "active_workflow_runtime",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -242,6 +258,49 @@ class MCPToolboxGateway:
                 "requires_approval": True,
             },
         ]
+
+    def resolve_tool_chain(
+        self,
+        source_type: str,
+        target_type: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[List[str]]:
+        """
+        Deterministic Tool Capability Graph Pathfinding (BFS).
+        Finds the shortest sequence of tools that transforms `source_type` into `target_type`.
+        Returns:
+            - [] if source_type == target_type (already at target).
+            - List of tool IDs (e.g. ['repo_search', 'ast_complexity_analyzer']) if path exists.
+            - None if unreachable (disjoint types).
+        """
+        if source_type == target_type:
+            return []
+
+        catalog = tools if tools is not None else self.default_tool_catalog()
+
+        # Build adjacency graph: type -> List[Tuple[tool_id, next_type]]
+        graph: Dict[str, List[Tuple[str, str]]] = {}
+        for tool in catalog:
+            c_type = tool.get("consumes_type")
+            p_type = tool.get("produces_type")
+            if c_type and p_type:
+                graph.setdefault(c_type, []).append((tool["id"], p_type))
+
+        # BFS queue: (current_type, [tool_chain_so_far])
+        queue: List[Tuple[str, List[str]]] = [(source_type, [])]
+        visited_types: Set[str] = {source_type}
+
+        while queue:
+            curr_type, path = queue.pop(0)
+            if curr_type == target_type:
+                return path
+
+            for tool_id, next_type in graph.get(curr_type, []):
+                if next_type not in visited_types:
+                    visited_types.add(next_type)
+                    queue.append((next_type, path + [tool_id]))
+
+        return None
 
     # --- Built-in deterministic MCP tool handlers ---
     def _handle_repo_search(self, args: Dict[str, Any]) -> Dict[str, Any]:

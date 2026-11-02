@@ -57,3 +57,79 @@ async def test_websocket_broadcast_and_steering_event(fake_redis, monkeypatch):
 
     ws_manager.disconnect(ws1)
     ws_manager.disconnect(ws2)
+
+
+@pytest.mark.asyncio
+async def test_dag_api_endpoints_and_tool_chain(db_session):
+    import uuid
+    from httpx import AsyncClient, ASGITransport
+    from app.main import app
+    from app.database import get_db
+
+    app.dependency_overrides[get_db] = lambda: db_session
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        wf_id = f"test-dag-api-{uuid.uuid4().hex[:8]}"
+
+        # 1. Create root node
+        res1 = await client.post(
+            "/api/v1/blackboard/nodes",
+            json={
+                "workflow_id": wf_id,
+                "author_agent_id": "architect",
+                "node_type": "spec",
+                "payload": {"title": "API Gateway Spec"},
+            },
+        )
+        assert res1.status_code == 201
+        node1_id = res1.json()["id"]
+
+        # 2. Create child node
+        res2 = await client.post(
+            "/api/v1/blackboard/nodes",
+            json={
+                "workflow_id": wf_id,
+                "author_agent_id": "coder",
+                "node_type": "code",
+                "payload": {"code": "def route(): pass"},
+                "parent_node_id": node1_id,
+                "relation_type": "implements",
+            },
+        )
+        assert res2.status_code == 201
+        node2_id = res2.json()["id"]
+
+        # 3. Test cycle detection on edge creation: node2 -> node1 creates cycle
+        res_cycle = await client.post(
+            "/api/v1/blackboard/edges",
+            json={
+                "source_id": node2_id,
+                "target_id": node1_id,
+                "relation_type": "revises",
+            },
+        )
+        assert res_cycle.status_code == 400
+        assert "cycle" in res_cycle.json()["detail"].lower()
+
+        # 4. Fetch full graph
+        graph_res = await client.get(f"/api/v1/blackboard/graph/{wf_id}")
+        assert graph_res.status_code == 200
+        graph_data = graph_res.json()
+        assert len(graph_data["nodes"]) == 2
+        assert len(graph_data["edges"]) == 1
+        assert len(graph_data["active_lineage"]) == 2
+
+        # 5. Test tool chain pathfinding endpoint
+        tc_res = await client.get(
+            "/api/v1/mcp/tool-chain?source_type=query_keyword&target_type=security_audit_report"
+        )
+        assert tc_res.status_code == 200
+        tc_data = tc_res.json()
+        assert tc_data["resolved"] is True
+        assert tc_data["tool_chain"] == [
+            "repo_search",
+            "ast_complexity_analyzer",
+            "static_security_scanner",
+        ]
+    app.dependency_overrides.clear()
+

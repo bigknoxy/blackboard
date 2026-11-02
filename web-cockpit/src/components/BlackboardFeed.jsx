@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { api } from "../api";
+import BlackboardGraphCanvas from "./BlackboardGraphCanvas";
 
 const BADGE_STYLES = {
   hypothesis: "bg-purple-500/20 text-purple-300 border-purple-500/40",
@@ -37,6 +38,7 @@ export default function BlackboardFeed({
   const [showTelemetry, setShowTelemetry] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [pruning, setPruning] = useState(false);
+  const [activeTab, setActiveTab] = useState("feed"); // "feed" | "dag_graph"
 
   const filteredEntries = useMemo(
     () =>
@@ -114,12 +116,38 @@ export default function BlackboardFeed({
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {/* View Mode Switcher */}
+            <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
+              <button
+                type="button"
+                onClick={() => setActiveTab("feed")}
+                className={`min-h-[36px] px-3 py-1 rounded-md font-medium transition ${
+                  activeTab === "feed"
+                    ? "bg-indigo-600 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Feed
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("dag_graph")}
+                className={`min-h-[36px] px-3 py-1 rounded-md font-medium transition ${
+                  activeTab === "dag_graph"
+                    ? "bg-cyan-600 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                DAG Graph
+              </button>
+            </div>
+
             <button
               onClick={handlePruneDebate}
               disabled={pruning}
               className="min-h-[44px] min-w-[44px] px-3 py-2 text-xs font-semibold rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 transition"
             >
-              {pruning ? "Pruning..." : "Condense / Prune"}
+              {pruning ? "Pruning..." : "Condense"}
             </button>
             <button
               onClick={() => setShowTelemetry((prev) => !prev)}
@@ -130,7 +158,13 @@ export default function BlackboardFeed({
           </div>
         </div>
 
-        {/* Sticky Filter Tag Bar (#spec, #critique, #code, #steering) with >=44x44px touch targets */}
+        {activeTab === "dag_graph" ? (
+          <div className="mt-4">
+            <BlackboardGraphCanvas workflowId={selectedWorkflowId} />
+          </div>
+        ) : (
+          <>
+            {/* Sticky Filter Tag Bar (#spec, #critique, #code, #steering) with >=44x44px touch targets */}
         <div
           role="toolbar"
           aria-label="Filter Blackboard Artifacts"
@@ -286,6 +320,8 @@ export default function BlackboardFeed({
               Next Window
             </button>
           </div>
+        )}
+          </>
         )}
       </div>
 
