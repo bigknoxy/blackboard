@@ -603,6 +603,19 @@ class WorkflowEngine:
                     "status": "AWAITING_APPROVAL",
                 }
             )
+            # Notify external channels (Discord/Telegram) of pending HITL gate
+            try:
+                from app.main import _notify_external_channels
+                import asyncio
+                alert_text = (
+                    f"⚠️ **[Blackboard HITL Gate]** Approval requested for workflow `{workflow.id}`!\n"
+                    f"- Node: **{node.get('name', nid)}** (`{nid}`)\n"
+                    f"- Run ID: `{run.id}`\n"
+                    f"Review artifacts and approve in Web Cockpit: http://192.168.8.109:5173"
+                )
+                asyncio.create_task(_notify_external_channels(alert_text))
+            except Exception:
+                pass
             return
 
         # Default: ServiceTask -> Enqueue task to Redis Stream `stream:tasks`

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import uuid
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1430,6 +1431,45 @@ async def update_channels_config(payload: ChannelConfigRequest) -> Dict[str, Any
         await redis_client.set("channel:discord:enabled", "true" if payload.discord_enabled else "false")
 
     return await get_channels_status()
+
+
+@app.post("/api/v1/channels/test")
+async def test_channels_broadcast(
+    message: Optional[str] = Query(default="🔔 [Blackboard Test] Discord webhook connectivity verified!")
+) -> Dict[str, Any]:
+    """Manually send a test broadcast message to all enabled external channels."""
+    redis_client = await get_redis()
+    results: Dict[str, Any] = {}
+    
+    dc_webhook = await redis_client.get("channel:discord:webhook") or os.getenv("DISCORD_WEBHOOK_URL", "")
+    dc_en = await redis_client.get("channel:discord:enabled")
+    if dc_webhook and str(dc_en).lower() in ("true", "1", "none"):
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                res = await client.post(dc_webhook, json={"content": message})
+                results["discord"] = {"status": "DELIVERED", "http_code": res.status_code}
+        except Exception as exc:
+            results["discord"] = {"status": "ERROR", "error": str(exc)}
+    else:
+        results["discord"] = {"status": "SKIPPED", "reason": "not configured or disabled"}
+
+    tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    tg_chat_id = await redis_client.get("channel:telegram:chat_id") or os.getenv("TELEGRAM_CHAT_ID", "")
+    tg_en = await redis_client.get("channel:telegram:enabled")
+    if tg_token and tg_chat_id and str(tg_en).lower() in ("true", "1", "none"):
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                res = await client.post(
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                    json={"chat_id": tg_chat_id, "text": message},
+                )
+                results["telegram"] = {"status": "DELIVERED", "http_code": res.status_code}
+        except Exception as exc:
+            results["telegram"] = {"status": "ERROR", "error": str(exc)}
+    else:
+        results["telegram"] = {"status": "SKIPPED", "reason": "not configured or disabled"}
+
+    return {"message": message, "results": results}
 
 
 async def _notify_external_channels(text: str) -> None:

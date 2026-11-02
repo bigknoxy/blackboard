@@ -694,6 +694,19 @@ class MCPToolboxGateway:
                     }
                 ),
             )
+            # Notify external channels (Discord/Telegram) of pending tool approval
+            try:
+                from app.main import _notify_external_channels
+                import asyncio
+                alert_text = (
+                    f"🛡️ **[Blackboard Tool HITL]** Agent `{req.agent_id}` requested execution of protected tool `{tool.id}`!\n"
+                    f"- Workflow: `{req.workflow_id}`\n"
+                    f"- Ticket ID: `{ticket.id}`\n"
+                    f"Approve or reject in Web Cockpit: http://192.168.8.109:5173"
+                )
+                asyncio.create_task(_notify_external_channels(alert_text))
+            except Exception:
+                pass
             return ToolInvokeResponse(
                 status="AWAITING_APPROVAL",
                 hitl_ticket_id=ticket.id,
