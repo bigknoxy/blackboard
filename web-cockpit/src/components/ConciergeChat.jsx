@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { api } from "../api";
 
 export default function ConciergeChat({
@@ -33,6 +33,13 @@ export default function ConciergeChat({
   const [savingChannel, setSavingChannel] = useState(false);
   const [testingChannels, setTestingChannels] = useState(false);
   const [channelTestResult, setChannelTestResult] = useState(null);
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof chatEndRef.current?.scrollIntoView === "function") {
+      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages, loading]);
 
   async function refreshChannelStatus() {
     try {
@@ -188,7 +195,7 @@ export default function ConciergeChat({
           {messages.map((m, idx) => (
             <div
               key={idx}
-              className={`p-3 rounded-xl text-xs leading-relaxed ${
+              className={`p-3 rounded-xl text-xs sm:text-sm leading-relaxed ${
                 m.role === "user"
                   ? "bg-indigo-600/20 border border-indigo-500/40 text-indigo-100 ml-6"
                   : "bg-slate-950 border border-slate-800 text-slate-200 mr-4"
@@ -202,42 +209,129 @@ export default function ConciergeChat({
               </pre>
             </div>
           ))}
+
+          {/* Animated Thinking & Processing Bubble */}
+          {loading && (
+            <div
+              data-testid="concierge-thinking-indicator"
+              className="p-3.5 rounded-xl text-xs sm:text-sm leading-relaxed bg-slate-950/90 border border-indigo-500/40 text-slate-200 mr-4 shadow-lg shadow-indigo-950/20"
+            >
+              <div className="flex items-center gap-2 mb-2 font-semibold text-[11px] uppercase tracking-wider text-indigo-400">
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-indigo-500"></span>
+                </span>
+                <span>Concierge Admin</span>
+                <span className="text-[10px] lowercase text-slate-400 font-mono">
+                  processing
+                </span>
+              </div>
+              <div className="flex items-center gap-2 py-1 text-slate-300">
+                <div className="flex items-center gap-1">
+                  <span className="inline-block w-2 h-2 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.3s]"></span>
+                  <span className="inline-block w-2 h-2 rounded-full bg-indigo-400 animate-bounce [animation-delay:-0.15s]"></span>
+                  <span className="inline-block w-2 h-2 rounded-full bg-indigo-400 animate-bounce"></span>
+                </div>
+                <span className="text-xs sm:text-sm text-indigo-200/90 italic font-sans">
+                  Agent is thinking, consulting models &amp; executing tools...
+                </span>
+              </div>
+            </div>
+          )}
+          <div ref={chatEndRef} />
         </div>
 
-        {/* Sticky Bottom Input Field with Auto-Expanding Textarea & Mic/Attach Placeholders */}
-        <form
-          onSubmit={handleSend}
-          className="sticky bottom-0 bg-slate-900 pt-2 border-t border-slate-800 flex items-end gap-1.5"
-        >
+        {/* Quick prompt suggestions (one-touch shortcuts for mobile) */}
+        <div className="flex items-center gap-1.5 overflow-x-auto py-1.5 no-scrollbar border-t border-slate-800/60">
           <button
             type="button"
-            aria-label="Attach artifact"
+            onClick={() => setInput("steer: prioritize strict typing and robust tests")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            ⚡ Steer: Strict Typing
+          </button>
+          <button
+            type="button"
+            onClick={() => setInput("list agents and current tools")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            📋 List Agents
+          </button>
+          <button
+            type="button"
+            onClick={() => setInput("inspect platform state")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            ⚙️ Platform State
+          </button>
+          <button
+            type="button"
+            onClick={() => setInput("prune blackboard entries")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            🧹 Prune Board
+          </button>
+        </div>
+
+        {/* Mobile-Optimized Input Field: Full Width on Mobile, Expandable & Enter to Send */}
+        <form
+          onSubmit={handleSend}
+          className="sticky bottom-0 bg-slate-900 pt-2 border-t border-slate-800 flex items-end gap-2"
+        >
+          {/* On small mobile screens, hide unused stubs (+ / MIC) to maximize typing box width */}
+          <button
+            type="button"
+            aria-label="Attach artifact context"
+            title="Attach artifact context"
             data-testid="concierge-attach-btn"
-            className="min-h-[44px] min-w-[44px] shrink-0 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-bold flex items-center justify-center"
+            onClick={() =>
+              setInput((prev) => (prev ? `${prev}\n[context: ` : "[context: "))
+            }
+            className="hidden sm:flex min-h-[44px] min-w-[44px] shrink-0 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-bold items-center justify-center transition"
           >
             +
           </button>
           <button
             type="button"
             aria-label="Voice input"
+            title="Voice input"
             data-testid="concierge-mic-btn"
-            className="min-h-[44px] min-w-[44px] shrink-0 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-mono flex items-center justify-center"
+            onClick={() =>
+              setInput((prev) => (prev ? `${prev} [voice note]` : "[voice note]"))
+            }
+            className="hidden sm:flex min-h-[44px] min-w-[44px] shrink-0 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-mono items-center justify-center transition"
           >
             MIC
           </button>
+
           <textarea
             rows={textareaRows}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask Concierge or type 'steer: ...'..."
-            className="min-h-[44px] flex-1 resize-none bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-xs sm:text-sm text-slate-100 focus:outline-none"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSend(e);
+              }
+            }}
+            placeholder="Ask Concierge or type 'steer: ...'"
+            className="min-h-[50px] max-h-[140px] flex-1 resize-none bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl px-3.5 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none transition leading-relaxed"
           />
+
           <button
             type="submit"
-            disabled={loading}
-            className="min-h-[44px] min-w-[44px] shrink-0 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition"
+            disabled={loading || !input.trim()}
+            className="min-h-[50px] min-w-[72px] shrink-0 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs sm:text-sm font-semibold rounded-xl transition flex items-center justify-center gap-1.5 shadow-md shadow-indigo-900/20"
           >
-            {loading ? "..." : "Send"}
+            {loading ? (
+              <span className="flex items-center gap-1 font-mono text-xs">
+                <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
+                <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse [animation-delay:0.2s]"></span>
+                <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse [animation-delay:0.4s]"></span>
+              </span>
+            ) : (
+              <span>Send</span>
+            )}
           </button>
         </form>
       </div>
