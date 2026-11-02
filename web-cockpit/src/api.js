@@ -163,4 +163,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  testChannels: (message) =>
+    request(
+      message
+        ? `/channels/test?message=${encodeURIComponent(message)}`
+        : "/channels/test",
+      { method: "POST" }
+    ),
 };

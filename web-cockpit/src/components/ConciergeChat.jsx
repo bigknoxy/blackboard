@@ -31,6 +31,8 @@ export default function ConciergeChat({
   const [tgChatIdInput, setTgChatIdInput] = useState("");
   const [dcWebhookInput, setDcWebhookInput] = useState("");
   const [savingChannel, setSavingChannel] = useState(false);
+  const [testingChannels, setTestingChannels] = useState(false);
+  const [channelTestResult, setChannelTestResult] = useState(null);
 
   async function refreshChannelStatus() {
     try {
@@ -85,6 +87,21 @@ export default function ConciergeChat({
       // ignore
     } finally {
       setSavingChannel(false);
+    }
+  }
+
+  async function handleTestChannels() {
+    if (!api.testChannels) return;
+    setTestingChannels(true);
+    setChannelTestResult(null);
+    try {
+      const res = await api.testChannels("🔔 [Blackboard Test] Discord webhook connectivity verified from Web Cockpit!");
+      setChannelTestResult(res?.results || res);
+      await refreshChannelStatus();
+    } catch (err) {
+      setChannelTestResult({ error: err.message });
+    } finally {
+      setTestingChannels(false);
     }
   }
 
@@ -419,13 +436,41 @@ export default function ConciergeChat({
             placeholder="Discord Webhook URL (https://discord.com/api/webhooks/...)"
             className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
           />
-          <button
-            type="submit"
-            disabled={savingChannel}
-            className="min-h-[44px] w-full px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-semibold rounded-lg transition"
-          >
-            {savingChannel ? "Saving Channels..." : "Save External Channels Config"}
-          </button>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button
+              type="submit"
+              disabled={savingChannel}
+              className="min-h-[44px] flex-1 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-semibold rounded-lg transition"
+            >
+              {savingChannel ? "Saving Channels..." : "Save External Channels Config"}
+            </button>
+            <button
+              type="button"
+              onClick={handleTestChannels}
+              disabled={testingChannels}
+              className="min-h-[44px] px-4 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-semibold rounded-lg transition flex items-center justify-center gap-1.5"
+            >
+              {testingChannels ? "Pinging..." : "Test Webhook"}
+            </button>
+          </div>
+          {channelTestResult && (
+            <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono space-y-1">
+              <div className="text-slate-400 font-semibold uppercase text-[10px]">Test Broadcast Result:</div>
+              {channelTestResult.discord && (
+                <div className={channelTestResult.discord.status === "DELIVERED" ? "text-emerald-400" : "text-amber-400"}>
+                  &bull; Discord: {channelTestResult.discord.status} {channelTestResult.discord.http_code ? `(HTTP ${channelTestResult.discord.http_code})` : ""} {channelTestResult.discord.error || channelTestResult.discord.reason || ""}
+                </div>
+              )}
+              {channelTestResult.telegram && (
+                <div className={channelTestResult.telegram.status === "DELIVERED" ? "text-emerald-400" : "text-slate-400"}>
+                  &bull; Telegram: {channelTestResult.telegram.status} {channelTestResult.telegram.http_code ? `(HTTP ${channelTestResult.telegram.http_code})` : ""} {channelTestResult.telegram.error || channelTestResult.telegram.reason || ""}
+                </div>
+              )}
+              {channelTestResult.error && (
+                <div className="text-rose-400">&bull; Error: {channelTestResult.error}</div>
+              )}
+            </div>
+          )}
         </form>
       </div>
     </div>
