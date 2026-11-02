@@ -1,0 +1,69 @@
+id: intake_pipeline
+name: Idea & Backlog Intake Pipeline
+description: >
+  Autonomous intake pipeline for new feature requests, architectural ideas, and system backlog:
+  Architect evaluates feasibility and spec -> Security Auditor assesses boundaries & RBAC ->
+  Operator signs off on priority and sprint readiness.
+nodes:
+  - id: start_intake_pipeline
+    name: Idea Intake Triggered
+    type: StartEvent
+
+  - id: stage_architect_feasibility
+    name: Architect Feasibility & Spec Analysis
+    type: ServiceTask
+    agent_id: architect
+    entry_type: spec
+    prompt_template: >
+      Analyze the proposed idea, backlog item, or feature request.
+      Assess architectural feasibility against AGENTS.md system invariants.
+      Formulate a technical specification including required MCP tools, database changes,
+      and recommended priority (P0 to P3).
+
+  - id: stage_security_impact
+    name: Security & RBAC Boundary Evaluation
+    type: ServiceTask
+    agent_id: sec-auditor
+    entry_type: critique
+    prompt_template: >
+      Audit the proposed feature specification from a security and least-privilege standpoint.
+      Identify potential attack vectors, credential exposure risks, unauthorized tool invocation pathways,
+      and recommend required HITL checkpoints.
+
+  - id: gateway_intake_feasibility
+    name: Intake Feasibility Verdict
+    type: ExclusiveGateway
+
+  - id: stage_operator_backlog_approval
+    name: Operator Priority & Sprint Approval
+    type: UserTask
+    agent_id: human-operator
+    prompt_template: >
+      Review the Architect's technical specification and the Security Auditor's risk critique.
+      Approve to promote this idea from 'triaged' to 'ready' in the production backlog.
+
+  - id: end_intake_pipeline
+    name: Intake Triaged & Backlogged
+    type: EndEvent
+
+edges:
+  - id: iflow_1
+    source: start_intake_pipeline
+    target: stage_architect_feasibility
+  - id: iflow_2
+    source: stage_architect_feasibility
+    target: stage_security_impact
+  - id: iflow_3
+    source: stage_security_impact
+    target: gateway_intake_feasibility
+  - id: iflow_4_pass
+    source: gateway_intake_feasibility
+    target: stage_operator_backlog_approval
+    condition: PASS
+  - id: iflow_4_rework
+    source: gateway_intake_feasibility
+    target: stage_architect_feasibility
+    condition: REWORK
+  - id: iflow_5
+    source: stage_operator_backlog_approval
+    target: end_intake_pipeline

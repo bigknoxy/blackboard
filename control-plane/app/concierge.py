@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     AgentMemoryModel,
     AgentModel,
+    BacklogItemModel,
     BlackboardEntryModel,
     HITLTicketModel,
     MCPToolModel,
@@ -97,6 +98,14 @@ class ConciergeAdminAgent:
         {
             "name": "prune_blackboard",
             "description": "Run the automated summarizer to condense older blackboard entries.",
+        },
+        {
+            "name": "capture_idea",
+            "description": "Capture an idea, feature request, or future task into the persistent Backlog table.",
+        },
+        {
+            "name": "list_backlog",
+            "description": "List active backlog items, ideas, and their statuses.",
         },
         {
             "name": "inspect_platform_state",
@@ -204,6 +213,91 @@ class ConciergeAdminAgent:
                         "description": "Triggered Meta-Workflow & Agent Architect Pipeline for Architect synthesis and Security Review.",
                     }
                 )
+
+        # Backlog & Idea Capture
+        if any(
+            k in lowered for k in [
+                "capture this as a future feature", "table this for now",
+                "capture this", "add to backlog", "save idea", "log idea",
+                "capture idea", "future feature", "table this", "add idea", "new idea"
+            ]
+        ):
+            clean_title = msg
+            for prefix in [
+                "capture this as a future feature", "table this for now but",
+                "table this for now", "capture this", "add to backlog", "save idea",
+                "log idea", "capture idea", "add idea", "new idea", ":"
+            ]:
+                if prefix in clean_title.lower():
+                    idx = clean_title.lower().find(prefix) + len(prefix)
+                    clean_title = clean_title[idx:].strip(" :,.-")
+            if not clean_title or len(clean_title) < 5:
+                clean_title = "Feature / Backlog Request: " + msg[:50]
+            else:
+                clean_title = clean_title[:100]
+
+            count_res = await session.execute(select(func.count(BacklogItemModel.id)))
+            next_num = (count_res.scalar_one() or 0) + 1
+            key = f"IDEA-{next_num}"
+
+            status_val = "tabled" if ("table this" in lowered or "for now" in lowered) else "idea"
+            b_item = BacklogItemModel(
+                key=key,
+                title=clean_title,
+                description=msg,
+                category="feature",
+                priority="P1",
+                status=status_val,
+                tags=["chat_capture", "operator_idea"],
+                metadata_={"source": "concierge_chat", "raw_message": msg},
+            )
+            session.add(b_item)
+            await session.commit()
+            await session.refresh(b_item)
+            await workflow_engine._publish_event(
+                {
+                    "event": "backlog.created",
+                    "id": str(b_item.id),
+                    "key": b_item.key,
+                    "title": b_item.title,
+                    "status": b_item.status,
+                }
+            )
+            tool_calls_executed.append(
+                {
+                    "tool": "capture_idea",
+                    "key": b_item.key,
+                    "title": b_item.title,
+                    "status": b_item.status,
+                }
+            )
+
+        # List Backlog Intent
+        if any(
+            k in lowered for k in [
+                "show backlog", "list backlog", "what ideas", "view ideas",
+                "show ideas", "backlog items", "what is on the backlog"
+            ]
+        ):
+            b_res = await session.execute(
+                select(BacklogItemModel).order_by(BacklogItemModel.created_at.desc()).limit(10)
+            )
+            b_items = b_res.scalars().all()
+            tool_calls_executed.append(
+                {
+                    "tool": "list_backlog",
+                    "count": len(b_items),
+                    "items": [
+                        {
+                            "key": i.key,
+                            "title": i.title,
+                            "status": i.status,
+                            "priority": i.priority,
+                        }
+                        for i in b_items
+                    ],
+                }
+            )
 
         state_snapshot = await self._build_state_snapshot(
             session, req.workflow_id
@@ -441,6 +535,20 @@ class ConciergeAdminAgent:
         if any(t["tool"] == "trigger_meta_workflow" for t in executed_tools):
             lines.append(
                 "- **Meta-Architecture Pipeline Triggered:** Dispatched to `architect` to synthesize the workflow specification, followed by `sec-auditor` RBAC review and your final HITL activation gate."
+            )
+        if any(t["tool"] == "capture_idea" for t in executed_tools):
+            item = next(t for t in executed_tools if t["tool"] == "capture_idea")
+            lines.append(
+                f"- **Backlog Item Captured (`{item['key']}`):** '{item['title']}' saved with status `{item['status']}`. You can review it in the Backlog view or run the Intake Pipeline anytime."
+            )
+        if any(t["tool"] == "list_backlog" for t in executed_tools):
+            b_tool = next(t for t in executed_tools if t["tool"] == "list_backlog")
+            items_str = "\n".join(
+                f"  • `[{it['key']}]` ({it['priority']}) {it['title']} — *{it['status']}*"
+                for it in b_tool.get("items", [])
+            )
+            lines.append(
+                f"- **Backlog & Ideas ({b_tool['count']}):**\n{items_str or '  (No backlog items)'}"
             )
         return "\n".join(lines)
 

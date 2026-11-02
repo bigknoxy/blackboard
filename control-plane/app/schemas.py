@@ -290,3 +290,49 @@ class ChannelIncomingMessage(BaseModel):
     sender_name: Optional[str] = None
     message: str
     workflow_id: Optional[str] = None
+
+
+# --- Backlog & Ideas Schemas ---
+class BacklogItemCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(default="")
+    category: Literal[
+        "feature", "workflow", "agent", "tool", "improvement", "bug", "research"
+    ] = "feature"
+    priority: Literal["P0", "P1", "P2", "P3"] = "P1"
+    status: Literal[
+        "idea", "triaged", "ready", "in_progress", "completed", "tabled"
+    ] = "idea"
+    tags: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BacklogItemUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[
+        Literal["feature", "workflow", "agent", "tool", "improvement", "bug", "research"]
+    ] = None
+    priority: Optional[Literal["P0", "P1", "P2", "P3"]] = None
+    status: Optional[
+        Literal["idea", "triaged", "ready", "in_progress", "completed", "tabled"]
+    ] = None
+    tags: Optional[List[str]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class BacklogItemResponse(BaseModel):
+    id: uuid.UUID
+    key: str
+    title: str
+    description: str
+    category: str
+    priority: str
+    status: str
+    tags: List[str]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+

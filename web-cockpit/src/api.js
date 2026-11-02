@@ -170,4 +170,22 @@ export const api = {
         : "/channels/test",
       { method: "POST" }
     ),
+
+  // Backlog, Ideas & Intake
+  listBacklog: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set("status", params.status);
+    if (params.category) q.set("category", params.category);
+    if (params.priority) q.set("priority", params.priority);
+    const qs = q.toString();
+    return request(qs ? `/backlog?${qs}` : "/backlog");
+  },
+  createBacklogItem: (payload) =>
+    request("/backlog", { method: "POST", body: JSON.stringify(payload) }),
+  updateBacklogItem: (id, payload) =>
+    request(`/backlog/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteBacklogItem: (id) =>
+    request(`/backlog/${id}`, { method: "DELETE" }),
+  triggerBacklogIntake: (id) =>
+    request(`/backlog/${id}/intake`, { method: "POST" }),
 };

@@ -116,7 +116,7 @@ export default function BpmnEditor({
   const nodes = workflow?.state_graph?.nodes || [];
 
   return (
-    <div className="space-y-4 w-full max-w-full overflow-x-hidden">
+    <div data-no-swipe="true" className="space-y-4 w-full max-w-full overflow-x-hidden">
       {/* Execution Trigger & View Mode Switcher */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-3.5 sm:p-4 space-y-3">
         <div>

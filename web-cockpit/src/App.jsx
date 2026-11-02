@@ -5,6 +5,7 @@ import BpmnEditor from "./components/BpmnEditor";
 import HITLGates from "./components/HITLGates";
 import ConciergeChat from "./components/ConciergeChat";
 import UserGuide from "./components/UserGuide";
+import BacklogModal from "./components/BacklogModal";
 
 export default function App() {
   const [mobilePanel, setMobilePanel] = useState("board"); // board | workflows | approvals | concierge | guide
@@ -20,23 +21,30 @@ export default function App() {
   const [liveEvents, setLiveEvents] = useState([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [touchStartX, setTouchStartX] = useState(null);
+  const [touchStartY, setTouchStartY] = useState(null);
+  const [touchStartTime, setTouchStartTime] = useState(null);
+  const [swipeEnabled, setSwipeEnabled] = useState(true);
+  const [backlogOpen, setBacklogOpen] = useState(false);
+  const [backlogCount, setBacklogCount] = useState(0);
 
   const PANEL_ORDER = ["board", "workflows", "approvals", "concierge"];
 
   const refreshAll = useCallback(async () => {
     try {
-      const [agList, tlList, wfList, bbList, hitlList] = await Promise.all([
+      const [agList, tlList, wfList, bbList, hitlList, bList] = await Promise.all([
         api.listAgents(),
         api.listTools(),
         api.listWorkflows(),
         api.listBlackboard(selectedWorkflowId),
         api.listHitlTickets(),
+        api.listBacklog ? api.listBacklog() : Promise.resolve([]),
       ]);
       setAgents(agList || []);
       setTools(tlList || []);
       setWorkflows(wfList || []);
       setBlackboardEntries(bbList || []);
       setHitlTickets(hitlList || []);
+      if (Array.isArray(bList)) setBacklogCount(bList.length);
     } catch (err) {
       console.warn("Initial fetch warning:", err.message);
     }
@@ -88,19 +96,76 @@ export default function App() {
     };
   }, [refreshAll]);
 
-  // Mobile horizontal swipe gesture handler between panels
+  // Helper to detect if touch originates inside an interactive element, diagram, code block, or scrollable area
+  function isSwipeIgnoredTarget(target) {
+    if (!target || typeof target.closest !== "function") return false;
+    const ignored = target.closest(
+      [
+        "[data-no-swipe]",
+        ".djs-container",
+        ".bjs-container",
+        ".djs-overlay-container",
+        "svg",
+        "canvas",
+        "pre",
+        "code",
+        "textarea",
+        "input",
+        "select",
+        "button",
+        '[role="button"]',
+        ".overflow-x-auto",
+        ".overflow-x-scroll",
+      ].join(", ")
+    );
+    return Boolean(ignored);
+  }
+
+  // Hardened Mobile horizontal swipe gesture handler
   function handleTouchStart(e) {
+    if (!swipeEnabled) return;
     if (e.touches && e.touches.length === 1) {
+      if (isSwipeIgnoredTarget(e.target)) {
+        setTouchStartX(null);
+        setTouchStartY(null);
+        return;
+      }
       setTouchStartX(e.touches[0].clientX);
+      setTouchStartY(e.touches[0].clientY);
+      setTouchStartTime(Date.now());
     }
   }
 
   function handleTouchEnd(e) {
-    if (touchStartX === null || !e.changedTouches || !e.changedTouches[0]) {
+    if (
+      !swipeEnabled ||
+      touchStartX === null ||
+      touchStartY === null ||
+      !e.changedTouches ||
+      !e.changedTouches[0]
+    ) {
+      setTouchStartX(null);
+      setTouchStartY(null);
       return;
     }
-    const deltaX = e.changedTouches[0].clientX - touchStartX;
-    if (Math.abs(deltaX) > 75) {
+
+    const touch = e.changedTouches[0];
+    const deltaX = touch.clientX - touchStartX;
+    const deltaY = touch.clientY - touchStartY;
+    const elapsed = Date.now() - (touchStartTime || 0);
+
+    // Intentional horizontal gesture filtering:
+    // 1. Must be a rapid swipe (< 650ms), preventing drag/pinch/inspection misfires
+    // 2. Horizontal distance must be substantial (>= 115px instead of 75px)
+    // 3. Vertical drift must be small (< 60px) to prevent vertical scrolling from flipping tabs
+    // 4. Horizontal travel must be at least 2.2x vertical travel to ensure horizontal intent
+    const isHorizontalSwipe =
+      elapsed < 650 &&
+      Math.abs(deltaX) >= 115 &&
+      Math.abs(deltaY) < 60 &&
+      Math.abs(deltaX) > Math.abs(deltaY) * 2.2;
+
+    if (isHorizontalSwipe) {
       const idx = PANEL_ORDER.indexOf(mobilePanel);
       if (deltaX < 0 && idx < PANEL_ORDER.length - 1) {
         setMobilePanel(PANEL_ORDER[idx + 1]);
@@ -109,6 +174,7 @@ export default function App() {
       }
     }
     setTouchStartX(null);
+    setTouchStartY(null);
   }
 
   const currentWorkflow =
@@ -171,6 +237,41 @@ export default function App() {
                 </option>
               ))}
             </select>
+
+            {/* Backlog & Ideas Quick Launcher */}
+            <button
+              type="button"
+              onClick={() => setBacklogOpen(true)}
+              className="min-h-[44px] px-3 py-1.5 rounded-lg bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700/80 text-indigo-200 text-xs font-semibold flex items-center gap-1.5 transition"
+              title="Open Backlog, Ideas & Feature Requests"
+            >
+              <span>💡</span>
+              <span className="hidden sm:inline">Backlog</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-indigo-800 text-[10px] font-mono">
+                {backlogCount}
+              </span>
+            </button>
+
+            {/* Swipe Lock / Sensitivity Toggle */}
+            <button
+              type="button"
+              onClick={() => setSwipeEnabled(!swipeEnabled)}
+              className={`min-h-[44px] min-w-[44px] px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold border transition flex items-center gap-1 ${
+                swipeEnabled
+                  ? "bg-slate-900 border-slate-700 text-slate-300 hover:text-white"
+                  : "bg-amber-950/70 border-amber-700 text-amber-300"
+              }`}
+              title={
+                swipeEnabled
+                  ? "Mobile swipe navigation active (Tap to lock)"
+                  : "Mobile swipe navigation locked (Tap to enable)"
+              }
+            >
+              <span>{swipeEnabled ? "👆" : "🔒"}</span>
+              <span className="hidden md:inline">
+                {swipeEnabled ? "Swipe" : "Locked"}
+              </span>
+            </button>
 
             {/* Desktop layout mode switcher (lg+) */}
             <div className="hidden lg:flex items-center bg-slate-950 border border-slate-800 rounded-lg p-1 gap-1">
@@ -398,6 +499,16 @@ export default function App() {
           <span>Guide</span>
         </button>
       </nav>
+
+      {/* Persistent Backlog, Ideas & Intake Modal */}
+      <BacklogModal
+        isOpen={backlogOpen}
+        onClose={() => setBacklogOpen(false)}
+        onIntakeTriggered={() => {
+          refreshAll();
+          setSelectedWorkflowId("intake_pipeline");
+        }}
+      />
     </div>
   );
 }
