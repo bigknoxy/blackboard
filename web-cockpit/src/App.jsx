@@ -504,9 +504,14 @@ export default function App() {
       <BacklogModal
         isOpen={backlogOpen}
         onClose={() => setBacklogOpen(false)}
-        onIntakeTriggered={() => {
+        onIntakeTriggered={(info) => {
+          setBacklogOpen(false);
           refreshAll();
-          setSelectedWorkflowId("intake_pipeline");
+          if (info?.workflow_id) {
+            setSelectedWorkflowId(info.workflow_id);
+          } else {
+            setSelectedWorkflowId("intake_pipeline");
+          }
         }}
       />
     </div>
