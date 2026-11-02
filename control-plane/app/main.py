@@ -17,7 +17,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.concierge import compute_embedding, concierge_agent
@@ -26,6 +26,7 @@ from app.mcp_gateway import mcp_gateway
 from app.models import (
     AgentMemoryModel,
     AgentModel,
+    BacklogItemModel,
     BlackboardEntryModel,
     HITLTicketModel,
     MCPToolModel,
@@ -36,6 +37,9 @@ from app.schemas import (
     AgentCreate,
     AgentResponse,
     AgentUpdate,
+    BacklogItemCreate,
+    BacklogItemResponse,
+    BacklogItemUpdate,
     BlackboardEntryCreate,
     BlackboardEntryResponse,
     ConciergeChatRequest,
@@ -309,6 +313,56 @@ async def seed_initial_state() -> None:
                     "Failed loading workflow file %s: %s", yaml_path, exc
                 )
         await session.commit()
+
+        # 5. Seed initial backlog & ideas if table is empty
+        res_backlog = await session.execute(select(BacklogItemModel).limit(1))
+        if not res_backlog.scalars().first():
+            initial_backlog = [
+                BacklogItemModel(
+                    key="IDEA-1",
+                    title="Discord 2-Way Interactive Bot Gateway",
+                    description=(
+                        "Tabled for now per operator directive. When activated, run a discord.py "
+                        "WebSocket gateway client with Message Content Intent enabled so users can "
+                        "chat directly with Concierge inside #blackboard without the Web Cockpit."
+                    ),
+                    category="feature",
+                    priority="P1",
+                    status="tabled",
+                    tags=["discord", "channels", "bot", "interactive"],
+                    metadata_={"suggested_by": "operator", "channel": "discord"},
+                ),
+                BacklogItemModel(
+                    key="IDEA-2",
+                    title="Autonomous Workflow & Agent Generator",
+                    description=(
+                        "Pipeline allowing the Architect Agent to generate, validate, and hot-reload "
+                        "new BPMN 2.0 workflows and agent personas via chat directives under operator sign-off."
+                    ),
+                    category="workflow",
+                    priority="P1",
+                    status="triaged",
+                    tags=["architecture", "meta-workflow", "self-modification"],
+                    metadata_={"suggested_by": "operator"},
+                ),
+                BacklogItemModel(
+                    key="IDEA-3",
+                    title="Mobile Gesture & Touch Optimization",
+                    description=(
+                        "Harden horizontal swipe sensitivity with angle/velocity gating and ignore-zones "
+                        "for BPMN canvas, YAML viewers, and code blocks."
+                    ),
+                    category="improvement",
+                    priority="P0",
+                    status="completed",
+                    tags=["mobile", "ui", "touch", "gestures"],
+                    metadata_={"suggested_by": "operator", "resolved_version": "v1.2.0"},
+                ),
+            ]
+            for b_item in initial_backlog:
+                session.add(b_item)
+            await session.commit()
+
 
 
 @asynccontextmanager
@@ -1553,6 +1607,222 @@ async def telegram_webhook_endpoint(
                 logger.warning("Telegram reply failed: %s", e)
 
     return {"status": "ok"}
+
+
+# ==============================================================================
+# 9. BACKLOG, IDEAS & INTAKE SYSTEM (/api/v1/backlog)
+# ==============================================================================
+@app.get("/api/v1/backlog", response_model=List[BacklogItemResponse])
+async def list_backlog_items(
+    status: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    priority: Optional[str] = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+) -> List[BacklogItemResponse]:
+    stmt = select(BacklogItemModel).order_by(BacklogItemModel.created_at.desc())
+    if status:
+        stmt = stmt.where(BacklogItemModel.status == status)
+    if category:
+        stmt = stmt.where(BacklogItemModel.category == category)
+    if priority:
+        stmt = stmt.where(BacklogItemModel.priority == priority)
+    result = await session.execute(stmt)
+    items = result.scalars().all()
+    return [
+        BacklogItemResponse(
+            id=item.id,
+            key=item.key,
+            title=item.title,
+            description=item.description,
+            category=item.category,
+            priority=item.priority,
+            status=item.status,
+            tags=item.tags,
+            metadata=item.metadata_,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+        for item in items
+    ]
+
+
+@app.post("/api/v1/backlog", response_model=BacklogItemResponse)
+async def create_backlog_item(
+    payload: BacklogItemCreate, session: AsyncSession = Depends(get_db)
+) -> BacklogItemResponse:
+    # Generate sequential IDEA key
+    count_res = await session.execute(select(func.count(BacklogItemModel.id)))
+    next_num = (count_res.scalar_one() or 0) + 1
+    key = f"IDEA-{next_num}"
+
+    item = BacklogItemModel(
+        key=key,
+        title=payload.title,
+        description=payload.description,
+        category=payload.category,
+        priority=payload.priority,
+        status=payload.status,
+        tags=payload.tags,
+        metadata_=payload.metadata,
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+
+    # Publish blackboard notification
+    await workflow_engine._publish_event(
+        {
+            "event": "backlog.created",
+            "id": str(item.id),
+            "key": item.key,
+            "title": item.title,
+            "priority": item.priority,
+            "status": item.status,
+        }
+    )
+
+    return BacklogItemResponse(
+        id=item.id,
+        key=item.key,
+        title=item.title,
+        description=item.description,
+        category=item.category,
+        priority=item.priority,
+        status=item.status,
+        tags=item.tags,
+        metadata=item.metadata_,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+@app.get("/api/v1/backlog/{item_id}", response_model=BacklogItemResponse)
+async def get_backlog_item(
+    item_id: str, session: AsyncSession = Depends(get_db)
+) -> BacklogItemResponse:
+    stmt = select(BacklogItemModel).where(
+        (BacklogItemModel.key == item_id) | (BacklogItemModel.id.cast(String) == item_id)
+    )
+    res = await session.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Backlog item not found.")
+    return BacklogItemResponse(
+        id=item.id,
+        key=item.key,
+        title=item.title,
+        description=item.description,
+        category=item.category,
+        priority=item.priority,
+        status=item.status,
+        tags=item.tags,
+        metadata=item.metadata_,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+@app.put("/api/v1/backlog/{item_id}", response_model=BacklogItemResponse)
+async def update_backlog_item(
+    item_id: str,
+    payload: BacklogItemUpdate,
+    session: AsyncSession = Depends(get_db),
+) -> BacklogItemResponse:
+    stmt = select(BacklogItemModel).where(
+        (BacklogItemModel.key == item_id) | (BacklogItemModel.id.cast(String) == item_id)
+    )
+    res = await session.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Backlog item not found.")
+
+    if payload.title is not None:
+        item.title = payload.title
+    if payload.description is not None:
+        item.description = payload.description
+    if payload.category is not None:
+        item.category = payload.category
+    if payload.priority is not None:
+        item.priority = payload.priority
+    if payload.status is not None:
+        item.status = payload.status
+    if payload.tags is not None:
+        item.tags = payload.tags
+    if payload.metadata is not None:
+        item.metadata_ = payload.metadata
+
+    await session.commit()
+    await session.refresh(item)
+    return BacklogItemResponse(
+        id=item.id,
+        key=item.key,
+        title=item.title,
+        description=item.description,
+        category=item.category,
+        priority=item.priority,
+        status=item.status,
+        tags=item.tags,
+        metadata=item.metadata_,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+@app.delete("/api/v1/backlog/{item_id}")
+async def delete_backlog_item(
+    item_id: str, session: AsyncSession = Depends(get_db)
+) -> Dict[str, str]:
+    stmt = select(BacklogItemModel).where(
+        (BacklogItemModel.key == item_id) | (BacklogItemModel.id.cast(String) == item_id)
+    )
+    res = await session.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Backlog item not found.")
+    await session.delete(item)
+    await session.commit()
+    return {"status": "deleted", "item_id": item_id}
+
+
+@app.post("/api/v1/backlog/{item_id}/intake")
+async def trigger_backlog_intake(
+    item_id: str, session: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
+    """Trigger the Intake & Triage pipeline workflow for this backlog item."""
+    stmt = select(BacklogItemModel).where(
+        (BacklogItemModel.key == item_id) | (BacklogItemModel.id.cast(String) == item_id)
+    )
+    res = await session.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Backlog item not found.")
+
+    intake_wf = await session.get(WorkflowModel, "intake_pipeline")
+    if not intake_wf:
+        intake_wf = await session.get(WorkflowModel, "meta_workflow_architect")
+    if not intake_wf:
+        raise HTTPException(status_code=404, detail="No intake workflow registered.")
+
+    prompt = (
+        f"INTAKE REVIEW FOR [{item.key}] {item.title}\n"
+        f"Category: {item.category} | Priority: {item.priority}\n\n"
+        f"Description:\n{item.description}\n\n"
+        f"Tags: {', '.join(item.tags)}\n"
+        f"Evaluate architectural feasibility, tool requirements, and security risks."
+    )
+    run = await workflow_engine.start_workflow_run(
+        session, intake_wf, initial_prompt=prompt, context={"backlog_key": item.key}
+    )
+
+    item.status = "triaged"
+    await session.commit()
+
+    return {
+        "status": "intake_started",
+        "backlog_key": item.key,
+        "workflow_id": intake_wf.id,
+        "run_id": str(run.id),
+    }
 
 
 @app.websocket("/ws/blackboard")

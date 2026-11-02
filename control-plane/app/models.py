@@ -227,3 +227,36 @@ class HITLTicketModel(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class BacklogItemModel(Base):
+    __tablename__ = "backlog_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    key: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    category: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="feature"
+    )  # feature | workflow | agent | tool | improvement | bug | research
+    priority: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="P1"
+    )  # P0 | P1 | P2 | P3
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="idea", index=True
+    )  # idea | triaged | ready | in_progress | completed | tabled
+    tags: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    metadata_: Mapped[Dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
