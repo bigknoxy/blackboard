@@ -456,18 +456,21 @@ class StatelessAgentRunner:
 
         provider = (inference_config.get("provider") or "ollama").lower()
         model_name = inference_config.get("model_name") or "qwen2.5-coder:0.5b"
-        temperature = float(inference_config.get("temperature", 0.2))
+        temperature_val = inference_config.get("temperature")
+        temperature = float(temperature_val if temperature_val is not None else 0.2)
         base_url = inference_config.get("base_url")
         default_timeout = (
             45.0
             if provider == "ollama"
             else (30.0 if provider == "nvidia_nim" else 25.0)
         )
+        raw_timeout = inference_config.get("timeout_seconds")
         timeout_sec = float(
-            inference_config.get("timeout_seconds", default_timeout)
+            raw_timeout if raw_timeout is not None else default_timeout
         )
+        raw_slow = inference_config.get("slow_threshold_seconds")
         slow_threshold_sec = float(
-            inference_config.get("slow_threshold_seconds", timeout_sec * 0.85)
+            raw_slow if raw_slow is not None else (timeout_sec * 0.85)
         )
 
         if provider == "ollama":
@@ -561,13 +564,19 @@ class StatelessAgentRunner:
                             else OPENAI_API_KEY
                         ),
                         "temperature": float(
-                            custom_fb.get("temperature", temperature)
+                            custom_fb.get("temperature")
+                            if custom_fb.get("temperature") is not None
+                            else temperature
                         ),
                         "timeout_seconds": float(
-                            custom_fb.get("timeout_seconds", 25.0)
+                            custom_fb.get("timeout_seconds")
+                            if custom_fb.get("timeout_seconds") is not None
+                            else 25.0
                         ),
                         "slow_threshold_seconds": float(
-                            custom_fb.get("slow_threshold_seconds", 20.0)
+                            custom_fb.get("slow_threshold_seconds")
+                            if custom_fb.get("slow_threshold_seconds") is not None
+                            else 20.0
                         ),
                         "max_rpm": nim_settings["max_rpm"],
                         "tier": "configured_fallback",

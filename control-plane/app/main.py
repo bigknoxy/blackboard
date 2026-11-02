@@ -1628,22 +1628,37 @@ async def list_backlog_items(
         stmt = stmt.where(BacklogItemModel.priority == priority)
     result = await session.execute(stmt)
     items = result.scalars().all()
-    return [
-        BacklogItemResponse(
-            id=item.id,
-            key=item.key,
-            title=item.title,
-            description=item.description,
-            category=item.category,
-            priority=item.priority,
-            status=item.status,
-            tags=item.tags,
-            metadata=item.metadata_,
-            created_at=item.created_at,
-            updated_at=item.updated_at,
+    response_items = []
+    for item in items:
+        meta = dict(item.metadata_ or {})
+        run_id = meta.get("intake_run_id")
+        if run_id:
+            try:
+                run_uuid = uuid.UUID(run_id)
+                wf_run = await session.get(WorkflowRunModel, run_uuid)
+                if wf_run:
+                    meta["intake_run_status"] = wf_run.status
+                    meta["intake_current_nodes"] = wf_run.current_nodes
+                    meta["intake_completed_nodes"] = wf_run.completed_nodes
+            except Exception:
+                pass
+
+        response_items.append(
+            BacklogItemResponse(
+                id=item.id,
+                key=item.key,
+                title=item.title,
+                description=item.description,
+                category=item.category,
+                priority=item.priority,
+                status=item.status,
+                tags=item.tags,
+                metadata=meta,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
         )
-        for item in items
-    ]
+    return response_items
 
 
 @app.post("/api/v1/backlog", response_model=BacklogItemResponse)
@@ -1814,6 +1829,11 @@ async def trigger_backlog_intake(
         session, intake_wf, initial_prompt=prompt, context={"backlog_key": item.key}
     )
 
+    item.metadata_ = {
+        **(item.metadata_ or {}),
+        "intake_run_id": str(run.id),
+        "intake_workflow_id": intake_wf.id,
+    }
     item.status = "triaged"
     await session.commit()
 
@@ -1823,6 +1843,51 @@ async def trigger_backlog_intake(
         "workflow_id": intake_wf.id,
         "run_id": str(run.id),
     }
+
+
+@app.get("/api/v1/backlog/{item_id}/artifacts")
+async def get_backlog_artifacts(
+    item_id: str, session: AsyncSession = Depends(get_db)
+) -> List[Dict[str, Any]]:
+    """Return all Blackboard artifacts generated during the intake pipeline for this backlog item."""
+    stmt = select(BacklogItemModel).where(
+        (BacklogItemModel.key == item_id) | (BacklogItemModel.id.cast(String) == item_id)
+    )
+    res = await session.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Backlog item not found.")
+
+    run_id = (item.metadata_ or {}).get("intake_run_id")
+    bb_stmt = select(BlackboardEntryModel).where(
+        (BlackboardEntryModel.workflow_id == "intake_pipeline")
+        | (BlackboardEntryModel.workflow_id == "meta_workflow_architect")
+    ).order_by(BlackboardEntryModel.created_at.asc())
+
+    bb_res = await session.execute(bb_stmt)
+    entries = bb_res.scalars().all()
+
+    filtered = []
+    for e in entries:
+        e_meta = e.metadata_ or {}
+        if (
+            e_meta.get("backlog_key") == item.key
+            or (run_id and e_meta.get("run_id") == run_id)
+            or (item.key in e.content)
+            or (run_id and run_id in e.task_id)
+        ):
+            filtered.append(
+                {
+                    "id": str(e.id),
+                    "task_id": e.task_id,
+                    "agent_id": e.agent_id,
+                    "entry_type": e.entry_type,
+                    "content": e.content,
+                    "created_at": e.created_at.isoformat(),
+                }
+            )
+    return filtered
+
 
 
 @app.websocket("/ws/blackboard")

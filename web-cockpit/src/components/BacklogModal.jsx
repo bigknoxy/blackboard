@@ -7,6 +7,9 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
   const [filterStatus, setFilterStatus] = useState("all");
   const [showAddForm, setShowAddForm] = useState(false);
   const [actionMsg, setActionMsg] = useState("");
+  const [artifactsMap, setArtifactsMap] = useState({});
+  const [expandedArtifacts, setExpandedArtifacts] = useState({});
+  const [triggeringKey, setTriggeringKey] = useState(null);
 
   // New Item Form State
   const [title, setTitle] = useState("");
@@ -29,7 +32,23 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
     try {
       const params = filterStatus !== "all" ? { status: filterStatus } : {};
       const res = await api.listBacklog(params);
-      setItems(res || []);
+      const list = res || [];
+      setItems(list);
+
+      // Fetch artifacts for items with an intake run
+      for (const item of list) {
+        if (item.metadata?.intake_run_id || item.status === "triaged" || item.metadata?.artifacts) {
+          if (item.metadata?.artifacts) {
+            setArtifactsMap((prev) => ({ ...prev, [item.key]: item.metadata.artifacts }));
+          } else if (api.getBacklogArtifacts) {
+            api.getBacklogArtifacts(item.key).then((arts) => {
+              if (arts && arts.length > 0) {
+                setArtifactsMap((prev) => ({ ...prev, [item.key]: arts }));
+              }
+            }).catch(() => {});
+          }
+        }
+      }
     } catch (err) {
       setActionMsg(`Failed to load backlog: ${err.message}`);
     } finally {
@@ -78,15 +97,45 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
   }
 
   async function handleTriggerIntake(itemKey) {
+    setTriggeringKey(itemKey);
     try {
-      setActionMsg(`Triggering Intake Pipeline for ${itemKey}...`);
+      setActionMsg(`⚡ Dispatched ${itemKey} to Architect & Security Auditor...`);
       const res = await api.triggerBacklogIntake(itemKey);
-      setActionMsg(`Intake Pipeline started! Run ID: ${res.run_id?.slice(0, 8)}`);
+      setActionMsg(`🚀 Intake Pipeline running for ${itemKey}! (Run ID: ${res.run_id?.slice(0, 8)})`);
       await loadBacklog();
-      if (onIntakeTriggered) onIntakeTriggered(res);
+      // Load artifacts immediately or poll
+      if (api.getBacklogArtifacts) {
+        const arts = await api.getBacklogArtifacts(itemKey);
+        if (arts && arts.length > 0) {
+          setArtifactsMap((prev) => ({ ...prev, [itemKey]: arts }));
+        }
+      }
     } catch (err) {
       setActionMsg(`Intake trigger failed: ${err.message}`);
+    } finally {
+      setTriggeringKey(null);
     }
+  }
+
+  async function toggleArtifact(itemKey, entryType) {
+    const currentKey = `${itemKey}_${entryType}`;
+    if (expandedArtifacts[currentKey]) {
+      setExpandedArtifacts((prev) => ({ ...prev, [currentKey]: null }));
+      return;
+    }
+
+    let arts = artifactsMap[itemKey];
+    if (!arts && api.getBacklogArtifacts) {
+      try {
+        arts = await api.getBacklogArtifacts(itemKey);
+        setArtifactsMap((prev) => ({ ...prev, [itemKey]: arts || [] }));
+      } catch {
+        arts = [];
+      }
+    }
+
+    const match = (arts || []).find((a) => a.entry_type === entryType);
+    setExpandedArtifacts((prev) => ({ ...prev, [currentKey]: match || { content: "No content available yet." } }));
   }
 
   async function handleDelete(itemKey) {
@@ -105,26 +154,26 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
   return (
     <div
       data-no-swipe="true"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/85 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
     >
       <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl max-h-[92dvh] flex flex-col shadow-2xl overflow-hidden">
         {/* Header */}
-        <div className="px-4 sm:px-6 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/90 sticky top-0 z-10">
-          <div className="flex items-center gap-2.5">
-            <div className="h-9 w-9 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
+        <div className="px-4 sm:px-6 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/95 sticky top-0 z-10">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="h-9 w-9 shrink-0 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
               💡
             </div>
-            <div>
-              <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+            <div className="truncate">
+              <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2 truncate">
                 Backlog &amp; Idea Intake
                 <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-950 border border-indigo-700 text-indigo-300 font-mono">
                   {items.length} items
                 </span>
               </h2>
-              <p className="text-[11px] text-slate-400">
-                Track future features, architecture proposals, and trigger Intake Pipelines
+              <p className="text-[11px] text-slate-400 truncate">
+                Autonomous intake pipeline &bull; Feasibility Specs &bull; Security Audits
               </p>
             </div>
           </div>
@@ -132,7 +181,7 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
             type="button"
             onClick={onClose}
             aria-label="Close modal"
-            className="min-h-[44px] min-w-[44px] rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-bold flex items-center justify-center"
+            className="min-h-[44px] min-w-[44px] rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-bold flex items-center justify-center shrink-0 ml-2"
           >
             ✕
           </button>
@@ -140,11 +189,11 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
 
         {/* Action / Notification Banner */}
         {actionMsg && (
-          <div className="px-4 py-2 bg-indigo-950/60 border-b border-indigo-800 text-indigo-200 text-xs flex justify-between items-center">
-            <span>{actionMsg}</span>
+          <div className="px-4 py-2 bg-indigo-950/80 border-b border-indigo-800 text-indigo-200 text-xs flex justify-between items-center gap-2">
+            <span className="font-medium">{actionMsg}</span>
             <button
               onClick={() => setActionMsg("")}
-              className="text-slate-400 hover:text-white px-2 py-1 text-xs"
+              className="text-slate-400 hover:text-white px-2 py-1 text-xs shrink-0"
             >
               dismiss
             </button>
@@ -152,7 +201,7 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
         )}
 
         {/* Filter bar & Add Idea Button */}
-        <div className="px-4 sm:px-6 py-3 border-b border-slate-800 bg-slate-950/50 flex flex-wrap items-center justify-between gap-2">
+        <div className="px-4 sm:px-6 py-2.5 border-b border-slate-800 bg-slate-950/50 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap gap-1.5 overflow-x-auto pb-1 sm:pb-0">
             {[
               { id: "all", label: "All Items" },
@@ -169,7 +218,7 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
                 onClick={() => setFilterStatus(tab.id)}
                 className={`min-h-[44px] px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
                   filterStatus === tab.id
-                    ? "bg-indigo-600 text-white"
+                    ? "bg-indigo-600 text-white shadow"
                     : "bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800"
                 }`}
               >
@@ -273,7 +322,7 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
         )}
 
         {/* Scrollable Backlog Items Feed */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3.5">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-4">
           {loading && (
             <div className="text-center py-10 text-slate-400 text-xs font-mono">
               Loading backlog items...
@@ -293,108 +342,348 @@ export default function BacklogModal({ isOpen, onClose, onIntakeTriggered }) {
           )}
 
           {!loading &&
-            items.map((item) => (
-              <div
-                key={item.id}
-                className="bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-xl p-4 transition space-y-3"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-indigo-950 border border-indigo-700 text-indigo-300">
-                        {item.key}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono uppercase ${
-                          item.priority === "P0"
-                            ? "bg-rose-950 border border-rose-700 text-rose-300"
-                            : item.priority === "P1"
-                            ? "bg-amber-950 border border-amber-700 text-amber-300"
-                            : "bg-slate-800 text-slate-300"
-                        }`}
-                      >
-                        {item.priority}
-                      </span>
-                      <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-slate-800 text-slate-300">
-                        {item.category}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
-                          item.status === "completed"
-                            ? "bg-emerald-950 text-emerald-300 border border-emerald-700"
-                            : item.status === "in_progress"
-                            ? "bg-sky-950 text-sky-300 border border-sky-700"
-                            : item.status === "triaged"
-                            ? "bg-purple-950 text-purple-300 border border-purple-700"
-                            : item.status === "tabled"
-                            ? "bg-zinc-900 text-zinc-400 border border-zinc-700"
-                            : "bg-indigo-950 text-indigo-300 border border-indigo-700"
-                        }`}
-                      >
-                        {item.status}
-                      </span>
+            items.map((item) => {
+              const meta = item.metadata || {};
+              const hasIntakeRun = Boolean(meta.intake_run_id || item.status === "triaged");
+              const isTriggering = triggeringKey === item.key;
+              const arts = artifactsMap[item.key] || meta.artifacts || [];
+              const hasSpec = arts.some((a) => a.entry_type === "spec");
+              const hasCritique = arts.some((a) => a.entry_type === "critique");
+
+              // Determine Stepper State
+              const currentNodes = meta.intake_current_nodes || [];
+              const completedNodes = meta.intake_completed_nodes || [];
+              const isArchRunning = currentNodes.includes("stage_architect_feasibility") || isTriggering;
+              const isArchDone = hasSpec || completedNodes.includes("stage_architect_feasibility");
+              const isSecRunning = currentNodes.includes("stage_security_impact");
+              const isSecDone = hasCritique || completedNodes.includes("stage_security_impact");
+              const isSignOffAwaiting =
+                currentNodes.includes("stage_operator_backlog_approval") ||
+                currentNodes.includes("stage_operator_approval") ||
+                (isArchDone && isSecDone && item.status === "triaged");
+              const isSignOffDone = item.status === "ready" || item.status === "completed";
+
+              const specExpandedKey = `${item.key}_spec`;
+              const critiqueExpandedKey = `${item.key}_critique`;
+
+              return (
+                <div
+                  key={item.id}
+                  className={`bg-slate-950 border rounded-xl p-4 transition space-y-3.5 ${
+                    hasIntakeRun
+                      ? "border-indigo-600/70 shadow-lg shadow-indigo-950/20"
+                      : "border-slate-800 hover:border-slate-700"
+                  }`}
+                >
+                  {/* Top Bar: Key, Badges, Title & Primary Action */}
+                  <div className="flex flex-wrap items-start justify-between gap-2.5">
+                    <div className="space-y-1.5 flex-1 min-w-[260px]">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-indigo-950 border border-indigo-700 text-indigo-300">
+                          {item.key}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono uppercase ${
+                            item.priority === "P0"
+                              ? "bg-rose-950 border border-rose-700 text-rose-300"
+                              : item.priority === "P1"
+                              ? "bg-amber-950 border border-amber-700 text-amber-300"
+                              : "bg-slate-800 text-slate-300"
+                          }`}
+                        >
+                          {item.priority}
+                        </span>
+                        <span className="px-2 py-0.5 rounded text-[10px] uppercase font-semibold bg-slate-800 text-slate-300">
+                          {item.category}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${
+                            item.status === "completed"
+                              ? "bg-emerald-950 text-emerald-300 border-emerald-700"
+                              : item.status === "in_progress"
+                              ? "bg-sky-950 text-sky-300 border-sky-700"
+                              : item.status === "triaged"
+                              ? "bg-purple-950 text-purple-300 border-purple-700"
+                              : item.status === "ready"
+                              ? "bg-emerald-950 text-emerald-300 border-emerald-700"
+                              : item.status === "tabled"
+                              ? "bg-zinc-900 text-zinc-400 border-zinc-700"
+                              : "bg-indigo-950 text-indigo-300 border-indigo-700"
+                          }`}
+                        >
+                          {item.status}
+                        </span>
+                        {hasIntakeRun && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-950 border border-indigo-700 text-indigo-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                            INTAKE ACTIVE
+                          </span>
+                        )}
+                      </div>
+                      <h3 className="text-sm sm:text-base font-semibold text-slate-100">
+                        {item.title}
+                      </h3>
                     </div>
-                    <h3 className="text-sm sm:text-base font-semibold text-slate-100">
-                      {item.title}
-                    </h3>
-                  </div>
 
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => handleTriggerIntake(item.key)}
-                      className="min-h-[44px] px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition flex items-center gap-1 shadow"
-                      title="Run automated Architect & Security Auditor intake pipeline"
-                    >
-                      <span>📐</span> Run Intake
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(item.key)}
-                      className="min-h-[44px] min-w-[44px] rounded-lg bg-slate-900 hover:bg-rose-950/50 hover:text-rose-300 text-slate-400 text-xs font-bold border border-slate-800"
-                      title="Delete item"
-                    >
-                      🗑
-                    </button>
-                  </div>
-                </div>
-
-                {item.description && (
-                  <p className="text-xs text-slate-300 leading-relaxed font-sans bg-slate-900/40 p-2.5 rounded-lg border border-slate-800/80">
-                    {item.description}
-                  </p>
-                )}
-
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/60 text-[11px]">
-                  <div className="flex flex-wrap gap-1">
-                    {item.tags?.map((tag) => (
-                      <span
-                        key={tag}
-                        className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 font-mono text-[10px]"
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {hasIntakeRun ? (
+                        <button
+                          type="button"
+                          aria-label="View Live Blackboard"
+                          onClick={() => {
+                            if (onIntakeTriggered) {
+                              onIntakeTriggered({
+                                workflow_id: meta.intake_workflow_id || "intake_pipeline",
+                                backlog_key: item.key,
+                              });
+                            }
+                            onClose();
+                          }}
+                          className="min-h-[44px] px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition flex items-center gap-1.5 shadow"
+                        >
+                          <span>👁️</span> View Live Blackboard
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleTriggerIntake(item.key)}
+                          disabled={isTriggering}
+                          className="min-h-[44px] px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition flex items-center gap-1.5 shadow"
+                          title="Run automated Architect & Security Auditor intake pipeline"
+                        >
+                          <span>📐</span> {isTriggering ? "Dispatched..." : "Run Intake"}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(item.key)}
+                        className="min-h-[44px] min-w-[44px] rounded-lg bg-slate-900 hover:bg-rose-950/50 hover:text-rose-300 text-slate-400 text-xs font-bold border border-slate-800"
+                        title="Delete item"
                       >
-                        #{tag}
-                      </span>
-                    ))}
+                        🗑
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <label className="text-slate-400">Change Status:</label>
-                    <select
-                      value={item.status}
-                      onChange={(e) => handleStatusChange(item.key, e.target.value)}
-                      className="min-h-[38px] bg-slate-900 border border-slate-700 rounded px-2 text-xs text-slate-200"
-                    >
-                      <option value="idea">idea</option>
-                      <option value="triaged">triaged</option>
-                      <option value="ready">ready</option>
-                      <option value="in_progress">in_progress</option>
-                      <option value="completed">completed</option>
-                      <option value="tabled">tabled</option>
-                    </select>
+                  {item.description && (
+                    <p className="text-xs text-slate-300 leading-relaxed font-sans bg-slate-900/50 p-2.5 rounded-lg border border-slate-800/80">
+                      {item.description}
+                    </p>
+                  )}
+
+                  {/* Enhanced Live Intake Stepper */}
+                  <div className="bg-slate-900/80 rounded-xl p-3 border border-slate-800 space-y-2">
+                    <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                      <span>Autonomous Intake Lifecycle</span>
+                      {meta.intake_run_id && (
+                        <span className="font-mono text-[10px] text-indigo-400">
+                          Run: {meta.intake_run_id.slice(0, 8)}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                      {/* Step 1: Idea Submitted */}
+                      <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 flex items-center gap-2">
+                        <span className="text-emerald-400 font-bold">✓</span>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-200 text-[11px] truncate">1. Idea Submitted</div>
+                          <div className="text-[10px] text-slate-400">Recorded</div>
+                        </div>
+                      </div>
+
+                      {/* Step 2: Architect Spec */}
+                      <div
+                        className={`p-2 rounded-lg border flex items-center gap-2 ${
+                          isArchDone
+                            ? "bg-slate-950 border-emerald-700/60 text-slate-200"
+                            : isArchRunning
+                            ? "bg-indigo-950/50 border-indigo-600 text-indigo-200 animate-pulse"
+                            : "bg-slate-950/40 border-slate-800 text-slate-500"
+                        }`}
+                      >
+                        <span className={isArchDone ? "text-emerald-400 font-bold" : "font-mono"}>
+                          {isArchDone ? "✓" : isArchRunning ? "⚡" : "○"}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-[11px] truncate">2. Architect Spec</div>
+                          <div className="text-[10px] text-slate-400">
+                            {isArchDone ? "Spec Ready" : isArchRunning ? "Analyzing..." : "Pending"}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Step 3: Security Audit */}
+                      <div
+                        className={`p-2 rounded-lg border flex items-center gap-2 ${
+                          isSecDone
+                            ? "bg-slate-950 border-emerald-700/60 text-slate-200"
+                            : isSecRunning
+                            ? "bg-amber-950/50 border-amber-600 text-amber-200 animate-pulse"
+                            : "bg-slate-950/40 border-slate-800 text-slate-500"
+                        }`}
+                      >
+                        <span className={isSecDone ? "text-emerald-400 font-bold" : "font-mono"}>
+                          {isSecDone ? "✓" : isSecRunning ? "⚡" : "○"}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-[11px] truncate">3. Security Audit</div>
+                          <div className="text-[10px] text-slate-400">
+                            {isSecDone ? "Audit Clean" : isSecRunning ? "Auditing..." : "Pending"}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Step 4: Sign-Off Gate */}
+                      <div
+                        className={`p-2 rounded-lg border flex items-center gap-2 ${
+                          isSignOffDone
+                            ? "bg-slate-950 border-emerald-700/60 text-emerald-300"
+                            : isSignOffAwaiting
+                            ? "bg-amber-950/60 border-amber-600 text-amber-200"
+                            : "bg-slate-950/40 border-slate-800 text-slate-500"
+                        }`}
+                      >
+                        <span className={isSignOffDone ? "text-emerald-400 font-bold" : "font-mono"}>
+                          {isSignOffDone ? "✓" : isSignOffAwaiting ? "⚠️" : "○"}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-[11px] truncate">4. Sign-Off Gate</div>
+                          <div className="text-[10px]">
+                            {isSignOffDone ? "Approved" : isSignOffAwaiting ? "Review Ready" : "Awaiting"}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Inline Artifact Chips (Spec & Critique) */}
+                    {(hasSpec || hasCritique) && (
+                      <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] text-slate-400 font-medium">Generated Artifacts:</span>
+                        {hasSpec && (
+                          <button
+                            type="button"
+                            aria-label="View Architect Spec"
+                            onClick={() => toggleArtifact(item.key, "spec")}
+                            className="min-h-[38px] px-3 py-1 rounded-lg bg-indigo-950 hover:bg-indigo-900 border border-indigo-700 text-indigo-300 text-xs font-semibold transition flex items-center gap-1.5"
+                          >
+                            <span>📄</span> View Architect Spec
+                          </button>
+                        )}
+                        {hasCritique && (
+                          <button
+                            type="button"
+                            aria-label="View Security Audit"
+                            onClick={() => toggleArtifact(item.key, "critique")}
+                            className="min-h-[38px] px-3 py-1 rounded-lg bg-amber-950 hover:bg-amber-900 border border-amber-700 text-amber-300 text-xs font-semibold transition flex items-center gap-1.5"
+                          >
+                            <span>🛡️</span> View Security Audit
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Expanded Artifact Content Drawer */}
+                    {expandedArtifacts[specExpandedKey] && (
+                      <div className="p-3 bg-slate-950 rounded-lg border border-indigo-700/60 space-y-1.5">
+                        <div className="flex justify-between items-center text-xs font-bold text-indigo-300 font-mono">
+                          <span>Architect Technical Spec</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleArtifact(item.key, "spec")}
+                            className="text-slate-400 hover:text-white"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                        <pre className="text-xs text-slate-200 whitespace-pre-wrap font-sans bg-slate-900/60 p-2.5 rounded border border-slate-800 max-h-48 overflow-y-auto">
+                          {expandedArtifacts[specExpandedKey].content}
+                        </pre>
+                      </div>
+                    )}
+
+                    {expandedArtifacts[critiqueExpandedKey] && (
+                      <div className="p-3 bg-slate-950 rounded-lg border border-amber-700/60 space-y-1.5">
+                        <div className="flex justify-between items-center text-xs font-bold text-amber-300 font-mono">
+                          <span>Security Auditor Critique</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleArtifact(item.key, "critique")}
+                            className="text-slate-400 hover:text-white"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                        <pre className="text-xs text-slate-200 whitespace-pre-wrap font-sans bg-slate-900/60 p-2.5 rounded border border-slate-800 max-h-48 overflow-y-auto">
+                          {expandedArtifacts[critiqueExpandedKey].content}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* In-Place Contextual Sign-Off Gate */}
+                    {isSignOffAwaiting && (
+                      <div className="p-3 bg-emerald-950/40 border border-emerald-700/70 rounded-lg flex flex-wrap items-center justify-between gap-2.5">
+                        <div>
+                          <div className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                            <span>✅</span> Architect &amp; Security Review Complete
+                          </div>
+                          <div className="text-[11px] text-slate-400">
+                            Promote to 'ready' sprint backlog or keep tabled.
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleStatusChange(item.key, "ready")}
+                            className="min-h-[40px] px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition shadow"
+                          >
+                            Approve into Ready
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleStatusChange(item.key, "tabled")}
+                            className="min-h-[40px] px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition"
+                          >
+                            Keep Tabled
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Footer Tag list & Manual Status Override */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/60 text-[11px]">
+                    <div className="flex flex-wrap gap-1">
+                      {item.tags?.map((tag) => (
+                        <span
+                          key={tag}
+                          className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 font-mono text-[10px]"
+                        >
+                          #{tag}
+                        </span>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="text-slate-400">Status:</label>
+                      <select
+                        value={item.status}
+                        onChange={(e) => handleStatusChange(item.key, e.target.value)}
+                        className="min-h-[38px] bg-slate-900 border border-slate-700 rounded px-2 text-xs text-slate-200"
+                      >
+                        <option value="idea">idea</option>
+                        <option value="triaged">triaged</option>
+                        <option value="ready">ready</option>
+                        <option value="in_progress">in_progress</option>
+                        <option value="completed">completed</option>
+                        <option value="tabled">tabled</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
         </div>
       </div>
     </div>

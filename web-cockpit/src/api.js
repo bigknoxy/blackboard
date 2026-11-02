@@ -188,4 +188,6 @@ export const api = {
     request(`/backlog/${id}`, { method: "DELETE" }),
   triggerBacklogIntake: (id) =>
     request(`/backlog/${id}/intake`, { method: "POST" }),
+  getBacklogArtifacts: (id) =>
+    request(`/backlog/${id}/artifacts`),
 };
