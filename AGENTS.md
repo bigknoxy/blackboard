@@ -63,14 +63,16 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 │       │   ├── BlackboardFeed.jsx   # Collapsible cards, line-clamp preview, DAG toggle, >=44px targets
 │       │   ├── BlackboardGraphCanvas.jsx # Interactive DAG lineage canvas, active path highlight, tool chain resolver
 │       │   ├── AgentManager.jsx     # Persona roster, live model routing, tool RBAC checklist & prompt editor
+│       │   ├── ToolsRegistry.jsx    # MCP tools catalog, capability graph flow visualizer, live tester & HITL toggles
 │       │   ├── BpmnEditor.jsx       # bpmn-js touch canvas + mobile Step-List/Timeline fallback
 │       │   ├── HITLGates.jsx        # Thumb-accessible Approve/Reject drawer + confirmation modal
-│       │   └── ConciergeChat.jsx    # dvh keyboard-aware chat, collapsible router & channels drawers
+│       │   └── ConciergeChat.jsx    # dvh keyboard-aware chat, action receipt cards, collapsible router & channels drawers
 │       └── tests/
 │           ├── BlackboardFeed.test.jsx
 │           ├── BlackboardFeedCollapsible.test.jsx
 │           ├── BlackboardGraphCanvas.test.jsx
 │           ├── AgentManager.test.jsx
+│           ├── ToolsRegistry.test.jsx
 │           ├── MobileNavigation.test.jsx
 │           └── HITLApprovalDrawer.test.jsx
 └── tests/
@@ -90,7 +92,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
         ├── test_zombie_lease_recovery.py
         ├── test_llm_router_resilience.py
         ├── test_blackboard_dag_engineering.py
-        └── test_agent_profile_hot_swap.py
+        ├── test_agent_profile_hot_swap.py
+        └── test_tools_registry_and_web_search.py
 ```
 
 ---
@@ -108,6 +111,7 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 9. **Causal Lineage Pruning (Falsifier 9):** `BlackboardGraphEngine.get_active_lineage` and `build_topological_context` MUST prune superseded nodes and resolved critiques while retaining the root spec, preventing context inflation and worker hallucination.
 10. **Deterministic Tool Chain Pathfinding (Falsifier 10):** `MCPToolboxGateway.resolve_tool_chain` MUST deterministically compute the shortest valid tool composition path using tool `consumes_type` and `produces_type` contracts without model trial-and-error.
 11. **Agent Profile Hot-Swapping & Dynamic RBAC Invalidation (Falsifier 11):** Persona mutations via `PUT /api/v1/agents/{id}` MUST atomically update PostgreSQL, invalidate the Redis cached configuration (`agent:config:{id}`), and immediately enforce new tool RBAC in `MCPToolboxGateway` without service restart.
+12. **MCP Tool Capability Registration & Web Search Execution (Falsifier 12):** Builtin MCP catalog MUST include `web_search` with typed contracts (`consumes_type="search_query"`, `produces_type="search_results"`). Concierge Admin Agent MUST recognize tool registration/addition intents, execute the addition in DB, and output structured `tool_calls_executed` action receipts. Tool invocation must strictly enforce agent RBAC.
 
 ---
 

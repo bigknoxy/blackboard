@@ -20,6 +20,7 @@ from app.models import (
 )
 from app.schemas import ConciergeChatRequest, ConciergeChatResponse
 from app.workflow_engine import workflow_engine
+from app.database import get_redis
 
 logger = logging.getLogger("blackboard.concierge")
 
@@ -110,6 +111,14 @@ class ConciergeAdminAgent:
         {
             "name": "inspect_platform_state",
             "description": "Inspect counts and recent entries across agents, tools, workflows, memories, and HITL tickets.",
+        },
+        {
+            "name": "upsert_tool",
+            "description": "Register or activate a tool in the centralized MCP toolbox.",
+        },
+        {
+            "name": "assign_tool_to_agent",
+            "description": "Assign an authorized tool to an agent's allowed_tools RBAC policy.",
         },
     ]
 
@@ -298,6 +307,55 @@ class ConciergeAdminAgent:
                     ],
                 }
             )
+
+        # Tool Management / Web Search Addition Intent
+        if any(
+            k in lowered for k in [
+                "add tool", "add tools", "web search", "web_search",
+                "create tool", "register tool", "add web_search"
+            ]
+        ):
+            from app.mcp_gateway import mcp_gateway
+            target_tool_id = "web_search"
+            tool_def = next(
+                (t for t in mcp_gateway.default_tool_catalog() if t["id"] == target_tool_id),
+                None
+            )
+            if tool_def:
+                existing_tool = await session.get(MCPToolModel, target_tool_id)
+                if not existing_tool:
+                    existing_tool = MCPToolModel(**tool_def)
+                    session.add(existing_tool)
+                    await session.commit()
+                    await session.refresh(existing_tool)
+
+                tool_calls_executed.append({
+                    "tool": "upsert_tool",
+                    "tool_id": target_tool_id,
+                    "name": tool_def["name"],
+                    "status": "REGISTERED",
+                    "consumes_type": tool_def.get("consumes_type"),
+                    "produces_type": tool_def.get("produces_type"),
+                })
+
+                all_agents = (await session.execute(select(AgentModel))).scalars().all()
+                for ag in all_agents:
+                    if (
+                        ag.id in lowered
+                        or ag.name.lower() in lowered
+                        or ("research" in lowered and "research" in ag.id)
+                    ):
+                        if target_tool_id not in (ag.allowed_tools or []):
+                            ag.allowed_tools = list(ag.allowed_tools or []) + [target_tool_id]
+                            await session.commit()
+                            r = get_redis()
+                            await r.delete(f"agent:config:{ag.id}")
+                            tool_calls_executed.append({
+                                "tool": "assign_tool_to_agent",
+                                "agent_id": ag.id,
+                                "tool_id": target_tool_id,
+                                "status": "ASSIGNED",
+                            })
 
         state_snapshot = await self._build_state_snapshot(
             session, req.workflow_id
@@ -520,6 +578,17 @@ class ConciergeAdminAgent:
             f"- **Vector Memories Stored (`pgvector`):** {snapshot['total_memories']}",
             f"- **Pending HITL Approval Tickets:** {len(snapshot['pending_hitl'])}",
         ]
+        if any(t["tool"] == "upsert_tool" for t in executed_tools):
+            u_tool = next(t for t in executed_tools if t["tool"] == "upsert_tool")
+            lines.append(
+                f"- **Tool Registered in MCP Toolbox:** `{u_tool['tool_id']}` ({u_tool.get('consumes_type', 'input')} → {u_tool.get('produces_type', 'output')}) is live and available in the Tools Registry."
+            )
+        if any(t["tool"] == "assign_tool_to_agent" for t in executed_tools):
+            a_tools = [t for t in executed_tools if t["tool"] == "assign_tool_to_agent"]
+            for at in a_tools:
+                lines.append(
+                    f"- **Agent RBAC Updated:** Granted `{at['tool_id']}` to `@{at['agent_id']}` (cache invalidated in Redis)."
+                )
         if any(t["tool"] == "inject_steering" for t in executed_tools):
             lines.append(
                 "- **Operator Steering Injected:** Published `entry_type='steering'` to the Blackboard; active workers will consume it on their next turn."

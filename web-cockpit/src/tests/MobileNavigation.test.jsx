@@ -50,35 +50,42 @@ describe("MobileNavigation - Responsive Shell & Bottom Navigation Bar", () => {
     };
   });
 
-  it("renders persistent mobile bottom navigation bar with [Board], [Workflows], [Approvals (with badge)], [Concierge]", async () => {
+  it("renders persistent mobile bottom navigation bar with [Board], [Agents], [Approvals], [Concierge], [More]", async () => {
     render(<App />);
 
     const bottomNav = screen.getByTestId("mobile-bottom-nav");
     expect(bottomNav).toBeDefined();
 
     const boardBtn = screen.getByTestId("mobile-nav-board");
-    const workflowsBtn = screen.getByTestId("mobile-nav-workflows");
     const agentsBtn = screen.getByTestId("mobile-nav-agents");
     const approvalsBtn = screen.getByTestId("mobile-nav-approvals");
     const conciergeBtn = screen.getByTestId("mobile-nav-concierge");
+    const moreBtn = screen.getByTestId("mobile-nav-more");
 
     expect(boardBtn.textContent).toContain("Board");
-    expect(workflowsBtn.textContent).toContain("Workflows");
     expect(agentsBtn.textContent).toContain("Agents");
     expect(approvalsBtn.textContent).toContain("Approvals");
     expect(conciergeBtn.textContent).toContain("Concierge");
+    expect(moreBtn.textContent).toContain("More");
 
     // Verify 44x44px minimum touch target classes
     expect(boardBtn.className).toContain("min-h-[44px]");
     expect(agentsBtn.className).toContain("min-h-[44px]");
     expect(approvalsBtn.className).toContain("min-h-[44px]");
+    expect(moreBtn.className).toContain("min-h-[44px]");
 
     // Switch mobile tabs via bottom bar: test switching to agents
     fireEvent.click(agentsBtn);
     expect(screen.getByTestId("agent-manager-view")).toBeDefined();
 
-    // Switch mobile tabs to concierge
-    fireEvent.click(conciergeBtn);
-    expect(screen.getAllByTestId("concierge-dvh-container").length).toBeGreaterThanOrEqual(1);
+    // Open More drawer
+    fireEvent.click(moreBtn);
+    expect(screen.getByTestId("mobile-more-drawer")).toBeDefined();
+
+    // In More drawer, click Skills & Tools
+    const toolsDrawerItem = screen.getByTestId("more-item-tools");
+    expect(toolsDrawerItem.textContent).toContain("Skills & Tools");
+    fireEvent.click(toolsDrawerItem);
+    expect(screen.getByTestId("tools-registry-container")).toBeDefined();
   });
 });

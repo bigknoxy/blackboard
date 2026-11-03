@@ -207,6 +207,70 @@ export default function ConciergeChat({
               <pre className="whitespace-pre-wrap break-words font-sans">
                 {m.content}
               </pre>
+
+              {/* Visual Action Receipt Cards */}
+              {Array.isArray(m.tools) && m.tools.length > 0 && (
+                <div
+                  data-testid="concierge-action-receipts"
+                  className="mt-3 pt-2.5 border-t border-slate-800/80 space-y-1.5"
+                >
+                  <div className="flex items-center gap-1.5 text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                    <span>⚡ Executed Action Receipts</span>
+                    <span className="px-1.5 py-0.2 rounded-full bg-slate-900 text-indigo-300 border border-slate-700">
+                      {m.tools.length}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                    {m.tools.map((rawTc, tIdx) => {
+                      const tc =
+                        typeof rawTc === "string"
+                          ? { tool: rawTc }
+                          : rawTc || {};
+                      return (
+                        <div
+                          key={tIdx}
+                          className="bg-slate-900/90 border border-emerald-500/30 rounded-lg p-2 text-xs flex flex-col gap-1 shadow-sm"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono text-emerald-400 font-semibold flex items-center gap-1 text-[11px]">
+                              <span>✓</span>
+                              <span>{tc.tool || "action"}</span>
+                            </span>
+                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800">
+                              {tc.status || "EXECUTED"}
+                            </span>
+                          </div>
+                          {tc.tool_id && (
+                            <div className="text-[11px] text-slate-300 font-mono">
+                              Tool: <span className="text-white font-bold">{tc.tool_id}</span>
+                              {tc.consumes_type && (
+                                <span className="text-slate-400 text-[10px] ml-1">
+                                  ({tc.consumes_type} ➔ {tc.produces_type})
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {tc.agent_id && (
+                            <div className="text-[11px] text-slate-300">
+                              Assigned to: <span className="text-indigo-400 font-mono">@{tc.agent_id}</span>
+                            </div>
+                          )}
+                          {tc.workflow_id && (
+                            <div className="text-[10px] text-slate-400 font-mono truncate">
+                              Pipeline: {tc.workflow_id}
+                            </div>
+                          )}
+                          {tc.key && (
+                            <div className="text-[11px] text-amber-300 font-mono">
+                              Backlog: {tc.key} — {tc.title}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
 
