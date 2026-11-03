@@ -35,16 +35,24 @@ AsyncSessionLocal = async_sessionmaker(
     autoflush=False,
 )
 
-redis_pool = aioredis.ConnectionPool.from_url(
-    REDIS_URL,
-    max_connections=25,
-    decode_responses=True,
-)
+import asyncio
+
+_redis_clients: dict = {}
 
 
 def get_redis() -> aioredis.Redis:
-    """Return an async Redis client bound to the shared connection pool."""
-    return aioredis.Redis(connection_pool=redis_pool)
+    """Return an async Redis client bound to the current running event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop not in _redis_clients or _redis_clients[loop] is None:
+        _redis_clients[loop] = aioredis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            max_connections=25,
+        )
+    return _redis_clients[loop]
 
 
 class Base(DeclarativeBase):

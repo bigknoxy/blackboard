@@ -34,6 +34,9 @@ export default function BlackboardFeed({
   const [filterType, setFilterType] = useState("ALL");
   const [page, setPage] = useState(1);
   const [expandedIds, setExpandedIds] = useState({});
+  const [collapsedCardIds, setCollapsedCardIds] = useState({});
+  const [expandedContentIds, setExpandedContentIds] = useState({});
+  const [showSteeringInput, setShowSteeringInput] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
   const [showTelemetry, setShowTelemetry] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -58,6 +61,31 @@ export default function BlackboardFeed({
 
   function toggleExpand(id) {
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function toggleCardCollapse(id) {
+    setCollapsedCardIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function toggleContentExpand(id) {
+    setExpandedContentIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function handleCollapseAll() {
+    const all = {};
+    visibleEntries.forEach((e) => {
+      all[e.id] = true;
+    });
+    setCollapsedCardIds(all);
+  }
+
+  function handleExpandAll() {
+    setCollapsedCardIds({});
+    const allContent = {};
+    visibleEntries.forEach((e) => {
+      allContent[e.id] = true;
+    });
+    setExpandedContentIds(allContent);
   }
 
   async function handleCopyContent(entry) {
@@ -164,136 +192,273 @@ export default function BlackboardFeed({
           </div>
         ) : (
           <>
-            {/* Sticky Filter Tag Bar (#spec, #critique, #code, #steering) with >=44x44px touch targets */}
-        <div
-          role="toolbar"
-          aria-label="Filter Blackboard Artifacts"
-          className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur py-2.5 flex items-center gap-2 overflow-x-auto border-b border-slate-800/80"
-        >
-          {FILTER_TAGS.map((tag) => {
-            const active = filterType === tag.id;
-            return (
-              <button
-                key={tag.id}
-                data-testid={`filter-tag-${tag.id.toLowerCase()}`}
-                onClick={() => {
-                  setFilterType(tag.id);
-                  setPage(1);
-                }}
-                className={`min-h-[44px] min-w-[44px] shrink-0 px-3.5 py-2 rounded-lg text-xs font-mono font-semibold border transition ${
-                  active
-                    ? "bg-indigo-600 text-white border-indigo-500 shadow"
-                    : "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700"
-                }`}
-              >
-                {tag.label}
-              </button>
-            );
-          })}
-        </div>
+            {/* Toolbar: Sticky Filter Tag Bar + Collapse All/Expand All Controls */}
+            <div
+              role="toolbar"
+              aria-label="Filter Blackboard Artifacts"
+              className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur py-2.5 flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80"
+            >
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                {FILTER_TAGS.map((tag) => {
+                  const active = filterType === tag.id;
+                  return (
+                    <button
+                      key={tag.id}
+                      data-testid={`filter-tag-${tag.id.toLowerCase()}`}
+                      onClick={() => {
+                        setFilterType(tag.id);
+                        setPage(1);
+                      }}
+                      className={`min-h-[44px] min-w-[44px] shrink-0 px-3.5 py-2 rounded-lg text-xs font-mono font-semibold border transition ${
+                        active
+                          ? "bg-indigo-600 text-white border-indigo-500 shadow"
+                          : "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700"
+                      }`}
+                    >
+                      {tag.label}
+                    </button>
+                  );
+                })}
+              </div>
 
-        {/* Operator Steering Injection Bar */}
-        <form
-          onSubmit={handleInjectSteering}
-          className="mt-3 flex flex-col sm:flex-row gap-2 bg-slate-950/80 p-2.5 rounded-lg border border-rose-500/30"
-        >
-          <input
-            type="text"
-            value={steeringText}
-            onChange={(e) => setSteeringText(e.target.value)}
-            placeholder="Inject live Operator Steering (`#steering`) for active agents..."
-            className="min-h-[44px] flex-1 bg-transparent px-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={submitting}
-            className="min-h-[44px] min-w-[44px] px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-md transition"
-          >
-            {submitting ? "Injecting..." : "Steer Agents"}
-          </button>
-        </form>
-
-        {/* Windowed / Paginated Card Feed */}
-        <div className="mt-4 space-y-3">
-          {visibleEntries.length === 0 ? (
-            <div className="text-center py-10 text-slate-500 text-sm">
-              No blackboard artifacts match this filter.
-            </div>
-          ) : (
-            visibleEntries.map((entry) => {
-              const badgeClass =
-                BADGE_STYLES[entry.entry_type] ||
-                "bg-slate-700 text-slate-200 border-slate-600";
-              const isExpanded = Boolean(expandedIds[entry.id]);
-              return (
-                <article
-                  key={entry.id}
-                  data-testid="blackboard-entry-card"
-                  className="p-3.5 sm:p-4 rounded-xl bg-slate-950/90 border border-slate-800 hover:border-slate-700 transition"
+              {/* Master Collapse / Expand Controls */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  data-testid="collapse-all-btn"
+                  onClick={handleCollapseAll}
+                  title="Collapse all visible cards to 1-line summaries"
+                  className="min-h-[36px] px-2.5 py-1 text-xs font-medium rounded-md bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 transition"
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={`text-[11px] font-mono uppercase px-2 py-0.5 rounded border ${badgeClass}`}
+                  Collapse All
+                </button>
+                <button
+                  type="button"
+                  data-testid="expand-all-btn"
+                  onClick={handleExpandAll}
+                  title="Expand all visible cards"
+                  className="min-h-[36px] px-2.5 py-1 text-xs font-medium rounded-md bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 transition"
+                >
+                  Expand All
+                </button>
+              </div>
+            </div>
+
+            {/* Operator Steering Injection Bar (Collapsible to save mobile space) */}
+            <div className="mt-3">
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  data-testid="toggle-steering-btn"
+                  onClick={() => setShowSteeringInput((prev) => !prev)}
+                  className="min-h-[38px] px-3 py-1.5 text-xs font-semibold rounded-lg bg-rose-950/40 hover:bg-rose-900/40 text-rose-300 border border-rose-800/40 transition flex items-center gap-1.5"
+                >
+                  <span>⚡ Live Operator Steering</span>
+                  <span className="text-[10px]">{showSteeringInput ? "▲" : "▼"}</span>
+                </button>
+              </div>
+
+              {showSteeringInput && (
+                <form
+                  onSubmit={handleInjectSteering}
+                  className="mt-2 flex flex-col sm:flex-row gap-2 bg-slate-950/80 p-2.5 rounded-lg border border-rose-500/30"
+                >
+                  <input
+                    type="text"
+                    value={steeringText}
+                    onChange={(e) => setSteeringText(e.target.value)}
+                    placeholder="Inject live Operator Steering (`#steering`) for active agents..."
+                    className="min-h-[44px] flex-1 bg-transparent px-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="min-h-[44px] min-w-[44px] px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-md transition"
+                  >
+                    {submitting ? "Injecting..." : "Steer Agents"}
+                  </button>
+                </form>
+              )}
+            </div>
+
+            {/* Windowed / Paginated Card Feed */}
+            <div className="mt-4 space-y-3">
+              {visibleEntries.length === 0 ? (
+                <div className="text-center py-10 text-slate-500 text-sm">
+                  No blackboard artifacts match this filter.
+                </div>
+              ) : (
+                visibleEntries.map((entry) => {
+                  const badgeClass =
+                    BADGE_STYLES[entry.entry_type] ||
+                    "bg-slate-700 text-slate-200 border-slate-600";
+                  const isExpandedMeta = Boolean(expandedIds[entry.id]);
+                  const isCardCollapsed = Boolean(collapsedCardIds[entry.id]);
+                  const isContentExpanded = Boolean(expandedContentIds[entry.id]);
+                  const lines = entry.content ? entry.content.split("\n") : [];
+                  const isLongContent = lines.length > 4 || (entry.content && entry.content.length > 220);
+
+                  // 1. Sleek 1-line collapsed summary chip
+                  if (isCardCollapsed) {
+                    return (
+                      <article
+                        key={entry.id}
+                        data-testid="blackboard-entry-card"
+                        className="p-2.5 sm:p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 hover:border-slate-700 transition flex items-center justify-between gap-3 cursor-pointer"
+                        onClick={() => toggleCardCollapse(entry.id)}
                       >
-                        #{entry.entry_type}
-                      </span>
-                      <span className="text-xs font-semibold text-indigo-300">
-                        @{entry.agent_id}
-                      </span>
-                      <span className="text-xs text-slate-500 font-mono">
-                        {entry.task_id}
-                      </span>
-                    </div>
-                    <span className="text-[11px] text-slate-500">
-                      {entry.created_at
-                        ? new Date(entry.created_at).toLocaleTimeString()
-                        : ""}
-                    </span>
-                  </div>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border shrink-0 ${badgeClass}`}
+                          >
+                            #{entry.entry_type}
+                          </span>
+                          <span className="text-xs font-semibold text-indigo-300 shrink-0">
+                            @{entry.agent_id}
+                          </span>
+                          <span className="text-xs text-slate-400 truncate">
+                            {lines[0] || "(empty payload)"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[11px] text-slate-500 hidden sm:inline font-mono">
+                            {entry.created_at
+                              ? new Date(entry.created_at).toLocaleTimeString()
+                              : ""}
+                          </span>
+                          <button
+                            type="button"
+                            data-testid="uncollapse-card-btn"
+                            aria-label="Expand entry card"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleCardCollapse(entry.id);
+                            }}
+                            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 text-xs font-mono"
+                          >
+                            ▼
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  }
 
-                  <pre className="text-xs sm:text-sm text-slate-200 whitespace-pre-wrap break-words font-sans leading-relaxed">
-                    {entry.content}
-                  </pre>
-
-                  {/* Touch-friendly >=44x44px Action Row */}
-                  <div className="mt-3 pt-2 border-t border-slate-900 flex items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      data-testid="copy-diff-btn"
-                      onClick={() => handleCopyContent(entry)}
-                      className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-medium text-slate-300 border border-slate-800 transition"
+                  // 2. Full or line-clamped card
+                  return (
+                    <article
+                      key={entry.id}
+                      data-testid="blackboard-entry-card"
+                      className="p-3.5 sm:p-4 rounded-xl bg-slate-950/90 border border-slate-800 hover:border-slate-700 transition"
                     >
-                      {copiedId === entry.id ? "Copied!" : "Copy Diff"}
-                    </button>
-                    <button
-                      type="button"
-                      data-testid="expand-entry-btn"
-                      onClick={() => toggleExpand(entry.id)}
-                      className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-medium text-indigo-300 border border-slate-800 transition"
-                    >
-                      {isExpanded ? "Hide Metadata" : "Inspect Metadata"}
-                    </button>
-                  </div>
-
-                  {isExpanded && (
-                    <div
-                      data-testid="expanded-entry-metadata"
-                      className="mt-2 p-3 rounded-lg bg-slate-900/90 border border-slate-800 text-xs font-mono text-slate-300 overflow-x-auto"
-                    >
-                      <div>Entry ID: {entry.id}</div>
-                      <div>Workflow: {entry.workflow_id}</div>
-                      <div>Agent: @{entry.agent_id}</div>
-                      <div>
-                        Metadata: {JSON.stringify(entry.metadata || {})}
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`text-[11px] font-mono uppercase px-2 py-0.5 rounded border ${badgeClass}`}
+                          >
+                            #{entry.entry_type}
+                          </span>
+                          <span className="text-xs font-semibold text-indigo-300">
+                            @{entry.agent_id}
+                          </span>
+                          <span className="text-xs text-slate-500 font-mono">
+                            {entry.task_id}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-slate-500 font-mono">
+                            {entry.created_at
+                              ? new Date(entry.created_at).toLocaleTimeString()
+                              : ""}
+                          </span>
+                          <button
+                            type="button"
+                            data-testid="collapse-card-btn"
+                            aria-label="Collapse entry to 1 line"
+                            title="Collapse entry to 1 line"
+                            onClick={() => toggleCardCollapse(entry.id)}
+                            className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white text-xs"
+                          >
+                            ▲
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </article>
-              );
-            })
-          )}
-        </div>
+
+                      {/* Content block with Line-Clamping & Gradient Fade */}
+                      <div className="relative">
+                        <pre
+                          className={`text-xs sm:text-sm text-slate-200 whitespace-pre-wrap break-words font-sans leading-relaxed ${
+                            isLongContent && !isContentExpanded
+                              ? "max-h-[110px] overflow-hidden"
+                              : ""
+                          }`}
+                        >
+                          {entry.content}
+                        </pre>
+
+                        {isLongContent && !isContentExpanded && (
+                          <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-slate-950 to-transparent pointer-events-none" />
+                        )}
+                      </div>
+
+                      {/* Show More / Show Less Toggle Button */}
+                      {isLongContent && (
+                        <div className="mt-1.5 flex justify-center">
+                          <button
+                            type="button"
+                            data-testid={isContentExpanded ? "show-less-btn" : "show-more-btn"}
+                            onClick={() => toggleContentExpand(entry.id)}
+                            className="min-h-[36px] px-3 py-1 rounded-md bg-indigo-950/60 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-800/50 text-xs font-medium transition flex items-center gap-1.5"
+                          >
+                            <span>
+                              {isContentExpanded
+                                ? "Show Less"
+                                : `Show More (${lines.length} lines)`}
+                            </span>
+                            <span className="text-[10px]">
+                              {isContentExpanded ? "▲" : "▼"}
+                            </span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Touch-friendly >=44x44px Action Row */}
+                      <div className="mt-3 pt-2 border-t border-slate-900 flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          data-testid="copy-diff-btn"
+                          onClick={() => handleCopyContent(entry)}
+                          className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-medium text-slate-300 border border-slate-800 transition"
+                        >
+                          {copiedId === entry.id ? "Copied!" : "Copy Diff"}
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="expand-entry-btn"
+                          onClick={() => toggleExpand(entry.id)}
+                          className="min-h-[44px] min-w-[44px] px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs font-medium text-indigo-300 border border-slate-800 transition"
+                        >
+                          {isExpandedMeta ? "Hide Metadata" : "Inspect Metadata"}
+                        </button>
+                      </div>
+
+                      {isExpandedMeta && (
+                        <div
+                          data-testid="expanded-entry-metadata"
+                          className="mt-2 p-3 rounded-lg bg-slate-900/90 border border-slate-800 text-xs font-mono text-slate-300 overflow-x-auto"
+                        >
+                          <div>Entry ID: {entry.id}</div>
+                          <div>Workflow: {entry.workflow_id}</div>
+                          <div>Agent: @{entry.agent_id}</div>
+                          <div>
+                            Metadata: {JSON.stringify(entry.metadata || {})}
+                          </div>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })
+              )}
+            </div>
 
         {/* Pagination / Virtual Window Controls for 50+ Event Streams */}
         {filteredEntries.length > PAGE_SIZE && (

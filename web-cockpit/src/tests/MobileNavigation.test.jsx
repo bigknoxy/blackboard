@@ -58,19 +58,26 @@ describe("MobileNavigation - Responsive Shell & Bottom Navigation Bar", () => {
 
     const boardBtn = screen.getByTestId("mobile-nav-board");
     const workflowsBtn = screen.getByTestId("mobile-nav-workflows");
+    const agentsBtn = screen.getByTestId("mobile-nav-agents");
     const approvalsBtn = screen.getByTestId("mobile-nav-approvals");
     const conciergeBtn = screen.getByTestId("mobile-nav-concierge");
 
     expect(boardBtn.textContent).toContain("Board");
     expect(workflowsBtn.textContent).toContain("Workflows");
+    expect(agentsBtn.textContent).toContain("Agents");
     expect(approvalsBtn.textContent).toContain("Approvals");
     expect(conciergeBtn.textContent).toContain("Concierge");
 
     // Verify 44x44px minimum touch target classes
     expect(boardBtn.className).toContain("min-h-[44px]");
+    expect(agentsBtn.className).toContain("min-h-[44px]");
     expect(approvalsBtn.className).toContain("min-h-[44px]");
 
-    // Switch mobile tabs via bottom bar
+    // Switch mobile tabs via bottom bar: test switching to agents
+    fireEvent.click(agentsBtn);
+    expect(screen.getByTestId("agent-manager-view")).toBeDefined();
+
+    // Switch mobile tabs to concierge
     fireEvent.click(conciergeBtn);
     expect(screen.getAllByTestId("concierge-dvh-container").length).toBeGreaterThanOrEqual(1);
   });
