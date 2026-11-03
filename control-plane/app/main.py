@@ -637,6 +637,12 @@ async def list_tools(
 ) -> List[MCPToolModel]:
     if agent_id:
         return await mcp_gateway.get_tools_for_agent(session, agent_id)
+    # Ensure default builtins exist in DB
+    for tool_def in mcp_gateway.default_tool_catalog():
+        existing = await session.get(MCPToolModel, tool_def["id"])
+        if not existing:
+            session.add(MCPToolModel(**tool_def))
+    await session.commit()
     result = await session.execute(
         select(MCPToolModel).order_by(MCPToolModel.id.asc())
     )

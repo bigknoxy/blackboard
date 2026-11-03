@@ -5,12 +5,13 @@ import BpmnEditor from "./components/BpmnEditor";
 import HITLGates from "./components/HITLGates";
 import ConciergeChat from "./components/ConciergeChat";
 import AgentManager from "./components/AgentManager";
+import ToolsRegistry from "./components/ToolsRegistry";
 import UserGuide from "./components/UserGuide";
 import BacklogModal from "./components/BacklogModal";
 
 export default function App() {
-  const [mobilePanel, setMobilePanel] = useState("board"); // board | workflows | agents | approvals | concierge | guide
-  const [desktopFocus, setDesktopFocus] = useState("split"); // split | board | workflows | agents | approvals | concierge | guide
+  const [mobilePanel, setMobilePanel] = useState("board"); // board | agents | approvals | concierge | workflows | tools | guide
+  const [desktopFocus, setDesktopFocus] = useState("split"); // split | board | workflows | agents | tools | approvals | concierge | guide
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [workflows, setWorkflows] = useState([]);
@@ -27,8 +28,17 @@ export default function App() {
   const [swipeEnabled, setSwipeEnabled] = useState(true);
   const [backlogOpen, setBacklogOpen] = useState(false);
   const [backlogCount, setBacklogCount] = useState(0);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 
-  const PANEL_ORDER = ["board", "workflows", "agents", "approvals", "concierge"];
+  const PANEL_ORDER = [
+    "board",
+    "agents",
+    "approvals",
+    "concierge",
+    "workflows",
+    "tools",
+    "guide",
+  ];
 
   const refreshAll = useCallback(async () => {
     try {
@@ -281,6 +291,7 @@ export default function App() {
                 { id: "board", label: "Focus Board" },
                 { id: "workflows", label: "Focus BPMN" },
                 { id: "agents", label: `Agents (${agents.length})` },
+                { id: "tools", label: `Tools (${tools.length})` },
                 { id: "approvals", label: `Approvals (${pendingHitlCount})` },
                 { id: "concierge", label: "Concierge" },
                 { id: "guide", label: "User Guide" },
@@ -300,6 +311,40 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        {/* Global Live Stream Activity Ribbon */}
+        {liveEvents.length > 0 && (
+          <div
+            data-testid="global-live-stream-ribbon"
+            className="border-t border-slate-800/80 bg-slate-950/70 px-4 py-1.5 flex items-center justify-between text-xs overflow-x-auto no-scrollbar gap-3"
+          >
+            <div className="flex items-center gap-2 truncate">
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase tracking-wider shrink-0">
+                Live Activity:
+              </span>
+              <span className="text-slate-300 font-mono text-[11px] truncate">
+                {liveEvents[0].event ? `[${liveEvents[0].event}]` : ""}{" "}
+                {liveEvents[0].agent_id ? `@${liveEvents[0].agent_id}` : ""}{" "}
+                {liveEvents[0].entry_type ? `#${liveEvents[0].entry_type}` : ""}{" "}
+                {liveEvents[0].content ? `— ${liveEvents[0].content}` : ""}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setMobilePanel("board");
+                setDesktopFocus("board");
+              }}
+              className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold shrink-0 underline"
+            >
+              Inspect ➔
+            </button>
+          </div>
+        )}
       </header>
 
       {/* Main Content Shell */}
@@ -370,6 +415,13 @@ export default function App() {
                   onAgentUpdated={refreshAll}
                 />
               )}
+              {desktopFocus === "tools" && (
+                <ToolsRegistry
+                  tools={tools}
+                  agents={agents}
+                  onToolUpdated={refreshAll}
+                />
+              )}
               {desktopFocus === "approvals" && (
                 <HITLGates
                   tickets={hitlTickets}
@@ -420,6 +472,13 @@ export default function App() {
               onAgentUpdated={refreshAll}
             />
           )}
+          {mobilePanel === "tools" && (
+            <ToolsRegistry
+              tools={tools}
+              agents={agents}
+              onToolUpdated={refreshAll}
+            />
+          )}
           {mobilePanel === "approvals" && (
             <HITLGates
               tickets={hitlTickets}
@@ -439,63 +498,63 @@ export default function App() {
         </div>
       </main>
 
-      {/* MOBILE (<lg): Persistent Bottom Navigation Bar with >=44x44px Touch Targets */}
+      {/* MOBILE (<lg): Ergonomic 5-Slot Bottom Navigation Bar with >=44x44px Touch Targets */}
       <nav
         data-testid="mobile-bottom-nav"
         aria-label="Mobile Primary Navigation"
-        className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 grid grid-cols-6 gap-1"
+        className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 grid grid-cols-5 gap-1.5"
       >
         <button
           data-testid="mobile-nav-board"
-          onClick={() => setMobilePanel("board")}
+          onClick={() => {
+            setMobilePanel("board");
+            setMobileMoreOpen(false);
+          }}
           className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "board"
+            mobilePanel === "board" && !mobileMoreOpen
               ? "bg-indigo-600 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
+          <span className="text-sm">📋</span>
           <span>Board</span>
         </button>
 
         <button
-          data-testid="mobile-nav-workflows"
-          onClick={() => setMobilePanel("workflows")}
-          className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "workflows"
-              ? "bg-indigo-600 text-white"
-              : "text-slate-400 hover:text-slate-200"
-          }`}
-        >
-          <span>Workflows</span>
-        </button>
-
-        <button
           data-testid="mobile-nav-agents"
-          onClick={() => setMobilePanel("agents")}
+          onClick={() => {
+            setMobilePanel("agents");
+            setMobileMoreOpen(false);
+          }}
           className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "agents"
+            mobilePanel === "agents" && !mobileMoreOpen
               ? "bg-indigo-600 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
+          <span className="text-sm">🤖</span>
           <span>Agents</span>
         </button>
 
         <button
           data-testid="mobile-nav-approvals"
-          onClick={() => setMobilePanel("approvals")}
+          onClick={() => {
+            setMobilePanel("approvals");
+            setMobileMoreOpen(false);
+          }}
           className={`relative min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "approvals"
+            mobilePanel === "approvals" && !mobileMoreOpen
               ? "bg-indigo-600 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
+          <span className="text-sm">🔒</span>
           <span className="flex items-center gap-1">
             Approvals
             {pendingHitlCount > 0 && (
               <span
                 data-testid="approvals-badge"
-                className="inline-flex items-center justify-center px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-amber-500 text-slate-950"
+                className="inline-flex items-center justify-center px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-amber-500 text-slate-950 shadow"
               >
                 {pendingHitlCount}
               </span>
@@ -505,28 +564,143 @@ export default function App() {
 
         <button
           data-testid="mobile-nav-concierge"
-          onClick={() => setMobilePanel("concierge")}
+          onClick={() => {
+            setMobilePanel("concierge");
+            setMobileMoreOpen(false);
+          }}
           className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "concierge"
+            mobilePanel === "concierge" && !mobileMoreOpen
               ? "bg-indigo-600 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
+          <span className="text-sm">💬</span>
           <span>Concierge</span>
         </button>
 
         <button
-          data-testid="mobile-nav-guide"
-          onClick={() => setMobilePanel("guide")}
+          data-testid="mobile-nav-more"
+          onClick={() => setMobileMoreOpen(!mobileMoreOpen)}
           className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "guide"
+            mobileMoreOpen || ["workflows", "tools", "guide"].includes(mobilePanel)
               ? "bg-indigo-600 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
-          <span>Guide</span>
+          <span className="text-sm">•••</span>
+          <span>More</span>
         </button>
       </nav>
+
+      {/* MOBILE More Drawer Bottom Sheet */}
+      {mobileMoreOpen && (
+        <div
+          data-testid="mobile-more-drawer"
+          className="lg:hidden fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex flex-col justify-end"
+          onClick={() => setMobileMoreOpen(false)}
+        >
+          <div
+            className="bg-slate-900 border-t border-slate-800 rounded-t-2xl p-5 space-y-3 shadow-2xl max-h-[80dvh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-base">🚀</span>
+                <h3 className="text-sm font-bold text-white">Platform Navigation &amp; Tools</h3>
+              </div>
+              <button
+                type="button"
+                data-testid="close-more-drawer"
+                onClick={() => setMobileMoreOpen(false)}
+                className="min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                data-testid="more-item-workflows"
+                onClick={() => {
+                  setMobilePanel("workflows");
+                  setMobileMoreOpen(false);
+                }}
+                className={`min-h-[52px] p-3 rounded-xl border text-left flex flex-col justify-center transition ${
+                  mobilePanel === "workflows"
+                    ? "bg-indigo-600/30 border-indigo-500 text-white"
+                    : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
+                }`}
+              >
+                <span className="text-xs font-bold flex items-center gap-1.5">
+                  <span>📐</span> Workflows &amp; BPMN
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5">Dual graph &amp; timeline</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="more-item-tools"
+                onClick={() => {
+                  setMobilePanel("tools");
+                  setMobileMoreOpen(false);
+                }}
+                className={`min-h-[52px] p-3 rounded-xl border text-left flex flex-col justify-center transition ${
+                  mobilePanel === "tools"
+                    ? "bg-indigo-600/30 border-indigo-500 text-white"
+                    : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
+                }`}
+              >
+                <span className="text-xs font-bold flex items-center gap-1.5">
+                  <span>🛠️</span> Skills &amp; Tools ({tools.length})
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5">MCP registry &amp; tester</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="more-item-backlog"
+                onClick={() => {
+                  setMobileMoreOpen(false);
+                  setBacklogOpen(true);
+                }}
+                className="min-h-[52px] p-3 rounded-xl border border-slate-800 bg-slate-950 text-slate-300 hover:border-slate-700 text-left flex flex-col justify-center transition"
+              >
+                <span className="text-xs font-bold flex items-center gap-1.5">
+                  <span>💡</span> Idea Backlog ({backlogCount})
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5">Feature capture &amp; intake</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="more-item-guide"
+                onClick={() => {
+                  setMobilePanel("guide");
+                  setMobileMoreOpen(false);
+                }}
+                className={`min-h-[52px] p-3 rounded-xl border text-left flex flex-col justify-center transition ${
+                  mobilePanel === "guide"
+                    ? "bg-indigo-600/30 border-indigo-500 text-white"
+                    : "bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700"
+                }`}
+              >
+                <span className="text-xs font-bold flex items-center gap-1.5">
+                  <span>📖</span> System Guide
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5">Architecture &amp; shortcuts</span>
+              </button>
+            </div>
+
+            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400 font-mono">
+              <span>Nodes: Ollama • CT118 • NIM</span>
+              <span className={wsConnected ? "text-emerald-400" : "text-amber-400"}>
+                {wsConnected ? "● Live WebSocket" : "○ Disconnected"}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Persistent Backlog, Ideas & Intake Modal */}
       <BacklogModal

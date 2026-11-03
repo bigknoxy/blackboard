@@ -105,6 +105,12 @@ class MCPToolModel(Base):
     input_schema: Mapped[Dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
+    consumes_type: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    produces_type: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
     requires_approval: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )

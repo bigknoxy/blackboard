@@ -76,6 +76,8 @@ class MCPToolCreate(BaseModel):
     transport: Literal["stdio", "sse", "http", "builtin"] = "builtin"
     endpoint_config: Dict[str, Any] = Field(default_factory=dict)
     input_schema: Dict[str, Any] = Field(default_factory=dict)
+    consumes_type: Optional[str] = None
+    produces_type: Optional[str] = None
     requires_approval: bool = False
 
 
@@ -86,6 +88,8 @@ class MCPToolUpdate(BaseModel):
     transport: Optional[Literal["stdio", "sse", "http", "builtin"]] = None
     endpoint_config: Optional[Dict[str, Any]] = None
     input_schema: Optional[Dict[str, Any]] = None
+    consumes_type: Optional[str] = None
+    produces_type: Optional[str] = None
     requires_approval: Optional[bool] = None
 
 

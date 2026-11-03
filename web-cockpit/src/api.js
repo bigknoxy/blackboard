@@ -77,6 +77,9 @@ export const api = {
     ),
   createTool: (payload) =>
     request("/tools", { method: "POST", body: JSON.stringify(payload) }),
+  updateTool: (id, payload) =>
+    request(`/tools/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteTool: (id) => request(`/tools/${id}`, { method: "DELETE" }),
   invokeTool: (payload) =>
     request("/tools/invoke", { method: "POST", body: JSON.stringify(payload) }),
 
