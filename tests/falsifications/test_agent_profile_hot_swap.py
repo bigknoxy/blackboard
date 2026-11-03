@@ -28,8 +28,28 @@ async def test_falsifier_11_agent_profile_hot_swap_and_rbac_invalidation(db_sess
     ) as client:
         agent_id = "coder"
 
-        # 1. Inspect initial agent state
+        # 1. Ensure agent exists (seeds if fresh CI environment)
         res = await client.get(f"/api/v1/agents/{agent_id}")
+        if res.status_code == 404:
+            create_res = await client.post(
+                "/api/v1/agents",
+                json={
+                    "id": agent_id,
+                    "name": "Coder",
+                    "role": "Software Engineer",
+                    "system_prompt": "You are an autonomous software engineer.",
+                    "allowed_tools": ["ast_complexity_analyzer", "git_commit_push"],
+                    "inference_config": {
+                        "provider": "ollama",
+                        "base_url": "http://192.168.1.150:11434",
+                        "model_name": "qwen2.5-coder:7b",
+                        "temperature": 0.2,
+                    },
+                },
+            )
+            assert create_res.status_code in (200, 201)
+            res = await client.get(f"/api/v1/agents/{agent_id}")
+
         assert res.status_code == 200
         initial_data = res.json()
         initial_tools = list(initial_data["allowed_tools"])
@@ -108,5 +128,7 @@ async def test_falsifier_11_agent_profile_hot_swap_and_rbac_invalidation(db_sess
                 "inference_config": initial_data["inference_config"],
             },
         )
+
+        await redis_client.aclose()
 
     app.dependency_overrides.clear()
