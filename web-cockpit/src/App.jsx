@@ -4,12 +4,13 @@ import BlackboardFeed from "./components/BlackboardFeed";
 import BpmnEditor from "./components/BpmnEditor";
 import HITLGates from "./components/HITLGates";
 import ConciergeChat from "./components/ConciergeChat";
+import AgentManager from "./components/AgentManager";
 import UserGuide from "./components/UserGuide";
 import BacklogModal from "./components/BacklogModal";
 
 export default function App() {
-  const [mobilePanel, setMobilePanel] = useState("board"); // board | workflows | approvals | concierge | guide
-  const [desktopFocus, setDesktopFocus] = useState("split"); // split | board | workflows | approvals | concierge | guide
+  const [mobilePanel, setMobilePanel] = useState("board"); // board | workflows | agents | approvals | concierge | guide
+  const [desktopFocus, setDesktopFocus] = useState("split"); // split | board | workflows | agents | approvals | concierge | guide
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [workflows, setWorkflows] = useState([]);
@@ -27,7 +28,7 @@ export default function App() {
   const [backlogOpen, setBacklogOpen] = useState(false);
   const [backlogCount, setBacklogCount] = useState(0);
 
-  const PANEL_ORDER = ["board", "workflows", "approvals", "concierge"];
+  const PANEL_ORDER = ["board", "workflows", "agents", "approvals", "concierge"];
 
   const refreshAll = useCallback(async () => {
     try {
@@ -279,6 +280,7 @@ export default function App() {
                 { id: "split", label: "3-Column Split" },
                 { id: "board", label: "Focus Board" },
                 { id: "workflows", label: "Focus BPMN" },
+                { id: "agents", label: `Agents (${agents.length})` },
                 { id: "approvals", label: `Approvals (${pendingHitlCount})` },
                 { id: "concierge", label: "Concierge" },
                 { id: "guide", label: "User Guide" },
@@ -361,6 +363,13 @@ export default function App() {
                   onWorkflowTriggered={refreshAll}
                 />
               )}
+              {desktopFocus === "agents" && (
+                <AgentManager
+                  agents={agents}
+                  tools={tools}
+                  onAgentUpdated={refreshAll}
+                />
+              )}
               {desktopFocus === "approvals" && (
                 <HITLGates
                   tickets={hitlTickets}
@@ -404,6 +413,13 @@ export default function App() {
               }}
             />
           )}
+          {mobilePanel === "agents" && (
+            <AgentManager
+              agents={agents}
+              tools={tools}
+              onAgentUpdated={refreshAll}
+            />
+          )}
           {mobilePanel === "approvals" && (
             <HITLGates
               tickets={hitlTickets}
@@ -427,7 +443,7 @@ export default function App() {
       <nav
         data-testid="mobile-bottom-nav"
         aria-label="Mobile Primary Navigation"
-        className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 grid grid-cols-5 gap-1"
+        className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 grid grid-cols-6 gap-1"
       >
         <button
           data-testid="mobile-nav-board"
@@ -451,6 +467,18 @@ export default function App() {
           }`}
         >
           <span>Workflows</span>
+        </button>
+
+        <button
+          data-testid="mobile-nav-agents"
+          onClick={() => setMobilePanel("agents")}
+          className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
+            mobilePanel === "agents"
+              ? "bg-indigo-600 text-white"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <span>Agents</span>
         </button>
 
         <button
