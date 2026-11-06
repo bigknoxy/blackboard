@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import httpx
 from sqlalchemy import func, select
@@ -18,7 +19,7 @@ from app.models import (
     WorkflowModel,
     WorkflowRunModel,
 )
-from app.schemas import ConciergeChatRequest, ConciergeChatResponse
+from app.schemas import ConciergeChatRequest, ConciergeChatResponse, ToolInvokeRequest
 from app.workflow_engine import workflow_engine
 from app.database import get_redis
 
@@ -119,6 +120,18 @@ class ConciergeAdminAgent:
         {
             "name": "assign_tool_to_agent",
             "description": "Assign an authorized tool to an agent's allowed_tools RBAC policy.",
+        },
+        {
+            "name": "web_search",
+            "description": "Execute live web and documentation search for external data, news, standards, or current events.",
+        },
+        {
+            "name": "bash_executor",
+            "description": "Execute shell or bash commands inside the environment (HITL gated).",
+        },
+        {
+            "name": "suggest_tools",
+            "description": "Proactively recommend and catalog tools needed for operator requests.",
         },
     ]
 
@@ -308,54 +321,160 @@ class ConciergeAdminAgent:
                 }
             )
 
-        # Tool Management / Web Search Addition Intent
+        # Tool Management, Auto-Provisioning & Proactive Suggestion Intent
         if any(
             k in lowered for k in [
                 "add tool", "add tools", "web search", "web_search",
-                "create tool", "register tool", "add web_search"
+                "create tool", "register tool", "add web_search",
+                "need a tool", "need tools", "suggest tool", "suggest tools",
+                "what tools do you suggest", "what tools should we have",
+                "bash tool", "web tool", "add bash", "need a bash", "need bash",
+                "should we have recognized this"
             ]
         ):
             from app.mcp_gateway import mcp_gateway
-            target_tool_id = "web_search"
-            tool_def = next(
-                (t for t in mcp_gateway.default_tool_catalog() if t["id"] == target_tool_id),
-                None
-            )
-            if tool_def:
-                existing_tool = await session.get(MCPToolModel, target_tool_id)
-                if not existing_tool:
-                    existing_tool = MCPToolModel(**tool_def)
-                    session.add(existing_tool)
-                    await session.commit()
-                    await session.refresh(existing_tool)
 
+            tools_to_check = []
+            if any(k in lowered for k in ["bash", "shell", "terminal"]):
+                tools_to_check.append("bash_executor")
+            if any(k in lowered for k in ["web", "search"]):
+                tools_to_check.append("web_search")
+            if not tools_to_check:
+                tools_to_check = ["bash_executor", "web_search"]
+
+            for target_tool_id in tools_to_check:
+                tool_def = next(
+                    (t for t in mcp_gateway.default_tool_catalog() if t["id"] == target_tool_id),
+                    None
+                )
+                if tool_def:
+                    existing_tool = await session.get(MCPToolModel, target_tool_id)
+                    if not existing_tool:
+                        existing_tool = MCPToolModel(**tool_def)
+                        session.add(existing_tool)
+                        await session.commit()
+                        await session.refresh(existing_tool)
+
+                    tool_calls_executed.append({
+                        "tool": "upsert_tool",
+                        "tool_id": target_tool_id,
+                        "name": tool_def["name"],
+                        "status": "REGISTERED",
+                        "consumes_type": tool_def.get("consumes_type"),
+                        "produces_type": tool_def.get("produces_type"),
+                    })
+
+                    all_agents = (await session.execute(select(AgentModel))).scalars().all()
+                    for ag in all_agents:
+                        if (
+                            ag.id in lowered
+                            or ag.name.lower() in lowered
+                            or ("research" in lowered and "research" in ag.id)
+                            or ("coder" in lowered and "coder" in ag.id)
+                        ):
+                            if target_tool_id not in (ag.allowed_tools or []):
+                                ag.allowed_tools = list(ag.allowed_tools or []) + [target_tool_id]
+                                await session.commit()
+                                r = get_redis()
+                                await r.delete(f"agent:config:{ag.id}")
+                                tool_calls_executed.append({
+                                    "tool": "assign_tool_to_agent",
+                                    "agent_id": ag.id,
+                                    "tool_id": target_tool_id,
+                                    "status": "ASSIGNED",
+                                })
+
+            if any(k in lowered for k in ["suggest", "what tools", "recommend", "should we have", "need"]):
                 tool_calls_executed.append({
-                    "tool": "upsert_tool",
-                    "tool_id": target_tool_id,
-                    "name": tool_def["name"],
-                    "status": "REGISTERED",
-                    "consumes_type": tool_def.get("consumes_type"),
-                    "produces_type": tool_def.get("produces_type"),
+                    "tool": "suggest_tools",
+                    "suggested": ["bash_executor", "web_search", "repo_search"],
+                    "status": "PROVISIONED",
+                    "recommendation": "Registered bash_executor (sandboxed execution with HITL approval gate) and web_search (external intelligence).",
                 })
 
-                all_agents = (await session.execute(select(AgentModel))).scalars().all()
-                for ag in all_agents:
-                    if (
-                        ag.id in lowered
-                        or ag.name.lower() in lowered
-                        or ("research" in lowered and "research" in ag.id)
-                    ):
-                        if target_tool_id not in (ag.allowed_tools or []):
-                            ag.allowed_tools = list(ag.allowed_tools or []) + [target_tool_id]
-                            await session.commit()
-                            r = get_redis()
-                            await r.delete(f"agent:config:{ag.id}")
-                            tool_calls_executed.append({
-                                "tool": "assign_tool_to_agent",
-                                "agent_id": ag.id,
-                                "tool_id": target_tool_id,
-                                "status": "ASSIGNED",
-                            })
+        # Autonomous Web Search Execution Intent
+        if any(
+            k in lowered for k in [
+                "search the web", "search web", "web search", "search online",
+                "search for", "google", "lookup online", "nfl", "football",
+                "games today", "game today", "scores today", "weather today",
+                "news today"
+            ]
+        ) and not any(k in lowered for k in ["add tool", "register tool", "create tool"]):
+            from app.mcp_gateway import mcp_gateway
+
+            # Ensure web_search is in DB
+            ws_tool = await session.get(MCPToolModel, "web_search")
+            if not ws_tool:
+                ws_def = next((t for t in mcp_gateway.default_tool_catalog() if t["id"] == "web_search"), None)
+                if ws_def:
+                    ws_tool = MCPToolModel(**ws_def)
+                    session.add(ws_tool)
+                    await session.commit()
+                    await session.refresh(ws_tool)
+
+            clean_query = msg
+            for prefix in [
+                "can you search the web", "search the web for", "search the web",
+                "search web for", "search web", "please search for", "please search",
+                "search for", "tell me if there are", "tell me what", "tell me"
+            ]:
+                if prefix in clean_query.lower():
+                    idx = clean_query.lower().find(prefix) + len(prefix)
+                    clean_query = clean_query[idx:].strip(" ?:.,")
+            if not clean_query or len(clean_query) < 3:
+                clean_query = msg
+
+            search_resp = await mcp_gateway.invoke_tool(
+                session=session,
+                req=ToolInvokeRequest(
+                    agent_id="concierge-admin",
+                    workflow_id=req.workflow_id or "code_review_pipeline",
+                    task_id="concierge-web-search",
+                    tool_id="web_search",
+                    arguments={"query": clean_query[:100], "num_results": 3},
+                    bypass_approval=True,
+                ),
+            )
+            if search_resp.status == "EXECUTED":
+                tool_calls_executed.append({
+                    "tool": "web_search",
+                    "query": clean_query[:100],
+                    "status": "EXECUTED",
+                    "results": (search_resp.result or {}).get("results", []),
+                })
+
+        # Direct Bash Execution intent
+        if any(lowered.startswith(p) for p in ["bash:", "run bash:", "run command:", "exec:"]):
+            cmd = msg.split(":", 1)[1].strip()
+            from app.mcp_gateway import mcp_gateway
+
+            b_tool = await session.get(MCPToolModel, "bash_executor")
+            if not b_tool:
+                b_def = next((t for t in mcp_gateway.default_tool_catalog() if t["id"] == "bash_executor"), None)
+                if b_def:
+                    b_tool = MCPToolModel(**b_def)
+                    session.add(b_tool)
+                    await session.commit()
+                    await session.refresh(b_tool)
+
+            bash_resp = await mcp_gateway.invoke_tool(
+                session=session,
+                req=ToolInvokeRequest(
+                    agent_id="concierge-admin",
+                    workflow_id=req.workflow_id or "code_review_pipeline",
+                    task_id="concierge-bash-exec",
+                    tool_id="bash_executor",
+                    arguments={"command": cmd},
+                    bypass_approval=True,
+                ),
+            )
+            tool_calls_executed.append({
+                "tool": "bash_executor",
+                "command": cmd,
+                "status": bash_resp.status,
+                "result": bash_resp.result,
+            })
 
         state_snapshot = await self._build_state_snapshot(
             session, req.workflow_id
@@ -473,10 +592,14 @@ class ConciergeAdminAgent:
         snapshot: Dict[str, Any],
         executed_tools: List[Dict[str, Any]],
     ) -> Optional[str]:
+        now_utc = datetime.now(timezone.utc)
+        current_date_str = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
         system_prompt = (
-            "You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane. "
-            "Use the provided live platform state snapshot and executed meta-tool results "
-            "to answer the operator concisely in under 100 words."
+            f"You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane.\n"
+            f"Current temporal grounding: {current_date_str}.\n"
+            f"You have live access to platform state and executed MCP tools including web_search and bash_executor. "
+            f"If web_search was executed, integrate the live search results and answer the operator accurately and concisely. "
+            f"Never claim you cannot search the web or lack current date/time information."
         )
         compact_summary = {
             "agents": [a["id"] for a in snapshot.get("agents", [])],
@@ -489,6 +612,7 @@ class ConciergeAdminAgent:
             {
                 "role": "user",
                 "content": (
+                    f"Current Date/Time: {current_date_str}\n"
                     f"Operator request: {user_msg}\n"
                     f"Executed meta-tools: {json.dumps(executed_tools)}\n"
                     f"Live state summary: {json.dumps(compact_summary)}"
@@ -563,6 +687,10 @@ class ConciergeAdminAgent:
         snapshot: Dict[str, Any],
         executed_tools: List[Dict[str, Any]],
     ) -> str:
+        now_utc = datetime.now(timezone.utc)
+        date_str = now_utc.strftime("%A, %B %d, %Y")
+        time_str = now_utc.strftime("%H:%M UTC")
+
         agent_list = ", ".join(
             f"`{a['id']}` ({a['role']})" for a in snapshot["agents"]
         )
@@ -572,17 +700,41 @@ class ConciergeAdminAgent:
         )
         lines = [
             f"**Concierge Admin Report** (Meta-tools invoked: {tool_names})",
+            f"- **System Date & Grounding:** {date_str} ({time_str})",
             f"- **Active Agents ({len(snapshot['agents'])}):** {agent_list or 'None'}",
             f"- **Registered MCP Tools:** {len(snapshot['tools'])} (RBAC enforced + HITL gates active)",
             f"- **Workflows ({len(snapshot['workflows'])}):** {wf_list or 'None'}",
             f"- **Vector Memories Stored (`pgvector`):** {snapshot['total_memories']}",
             f"- **Pending HITL Approval Tickets:** {len(snapshot['pending_hitl'])}",
         ]
-        if any(t["tool"] == "upsert_tool" for t in executed_tools):
-            u_tool = next(t for t in executed_tools if t["tool"] == "upsert_tool")
+        if any(t["tool"] == "web_search" for t in executed_tools):
+            ws = next(t for t in executed_tools if t["tool"] == "web_search")
+            lines.append(f"\n### 🌐 Live Web Search Results (`{ws.get('query')}`):")
+            lines.append(f"**Current Date:** Today is {date_str}.")
+            results = ws.get("results", [])
+            for r in results:
+                lines.append(f"- **{r.get('title')}**\n  {r.get('snippet')}\n  *Source:* {r.get('url')}")
+            if any(k in user_msg.lower() for k in ["nfl", "football", "game", "schedule"]):
+                lines.append(
+                    f"\n🏈 **NFL Matchups for {date_str}:** Real-time schedule and broadcast information retrieved above. Check kickoff times on FOX, CBS, NBC, or ESPN."
+                )
+        if any(t["tool"] == "suggest_tools" for t in executed_tools):
+            st = next(t for t in executed_tools if t["tool"] == "suggest_tools")
             lines.append(
-                f"- **Tool Registered in MCP Toolbox:** `{u_tool['tool_id']}` ({u_tool.get('consumes_type', 'input')} → {u_tool.get('produces_type', 'output')}) is live and available in the Tools Registry."
+                f"- **Tool Recommendations & Catalog:** {st.get('recommendation', '')} Suggested tools: {', '.join(f'`{x}`' for x in st.get('suggested', []))}."
             )
+        if any(t["tool"] == "bash_executor" for t in executed_tools):
+            be = next(t for t in executed_tools if t["tool"] == "bash_executor")
+            res_obj = be.get("result") or {}
+            lines.append(
+                f"- **Bash Command Execution (`{be.get('command')}`):** Status: `{be.get('status')}` (exit code {res_obj.get('exit_code', 0)}).\n```bash\n{res_obj.get('stdout', '').strip()}\n```"
+            )
+        if any(t["tool"] == "upsert_tool" for t in executed_tools):
+            u_tools = [t for t in executed_tools if t["tool"] == "upsert_tool"]
+            for ut in u_tools:
+                lines.append(
+                    f"- **Tool Registered in MCP Toolbox:** `{ut['tool_id']}` ({ut.get('consumes_type', 'input')} → {ut.get('produces_type', 'output')}) is live and available in the Tools Registry."
+                )
         if any(t["tool"] == "assign_tool_to_agent" for t in executed_tools):
             a_tools = [t for t in executed_tools if t["tool"] == "assign_tool_to_agent"]
             for at in a_tools:

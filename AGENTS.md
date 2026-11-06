@@ -95,7 +95,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
         ├── test_blackboard_dag_engineering.py
         ├── test_agent_profile_hot_swap.py
         ├── test_tools_registry_and_web_search.py
-        └── test_autonomous_optimizer_and_rollback.py
+        ├── test_autonomous_optimizer_and_rollback.py
+        └── test_concierge_temporal_web_and_bash.py
 ```
 
 ---
@@ -115,6 +116,7 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 11. **Agent Profile Hot-Swapping & Dynamic RBAC Invalidation (Falsifier 11):** Persona mutations via `PUT /api/v1/agents/{id}` MUST atomically update PostgreSQL, invalidate the Redis cached configuration (`agent:config:{id}`), and immediately enforce new tool RBAC in `MCPToolboxGateway` without service restart.
 12. **MCP Tool Capability Registration & Web Search Execution (Falsifier 12):** Builtin MCP catalog MUST include `web_search` with typed contracts (`consumes_type="search_query"`, `produces_type="search_results"`). Concierge Admin Agent MUST recognize tool registration/addition intents, execute the addition in DB, and output structured `tool_calls_executed` action receipts. Tool invocation must strictly enforce agent RBAC.
 13. **Autonomous Optimization Loop, Decoupled Shadow Sandbox & Safe Rollback Guard (Falsifier 13):** Optimization proposals yielding fitness $\le$ baseline MUST be rejected in the decoupled shadow sandbox as `REJECTED_REGRESSION` without mutating live state. Winning proposals ($\mathcal{F} > \text{baseline}$) MUST snapshot the prior persona into `agent_revisions`, atomically update `agents`, and bust the Redis cache (`agent:config:{id}`). If post-promotion live telemetry registers a regression, `evaluate_live_guard_and_rollback` MUST autonomously revert the agent to the previous snapshot without operator intervention.
+14. **Temporal Grounding, Autonomous Web Search Execution & HITL-Gated Bash Executor (Falsifier 14):** System prompts for the Concierge Admin Agent MUST dynamically inject the live UTC date and time. External intelligence or current events queries MUST autonomously trigger `web_search` via MCP Gateway and output structured `tool_calls_executed` action receipts. The MCP catalog MUST include `bash_executor` (`consumes_type="shell_command"`, `produces_type="command_output"`, `requires_approval=True`) with HITL gating. Missing capability requests must trigger proactive tool suggestions and auto-provisioning rather than denial of service.
 
 
 ---

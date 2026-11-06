@@ -38,8 +38,59 @@ describe("ConciergeChat - Mobile Input Ergonomics & Thinking Indicator", () => {
     const steerBtn = screen.getByText(/Steer: Strict Typing/i);
     expect(steerBtn).toBeDefined();
 
+    const webSearchBtn = screen.getByText(/Web Search & NFL/i);
+    expect(webSearchBtn).toBeDefined();
+
+    const bashBtn = screen.getByText(/Bash & Tools Suggestion/i);
+    expect(bashBtn).toBeDefined();
+
+    fireEvent.click(webSearchBtn);
+    expect(textarea.value).toContain("Tell me what today's date is and if there are any NFL games today");
+
     fireEvent.click(steerBtn);
     expect(textarea.value).toBe("steer: prioritize strict typing and robust tests");
+  });
+
+  it("renders visual action receipt cards for web_search, bash_executor and tool suggestions", async () => {
+    const { api } = await import("../api");
+    api.chatConcierge.mockResolvedValueOnce({
+      reply: "Executed web search and provisioned bash tool.",
+      tool_calls_executed: [
+        {
+          tool: "web_search",
+          query: "NFL games today",
+          status: "EXECUTED",
+        },
+        {
+          tool: "bash_executor",
+          command: "uname -a",
+          status: "SUCCESS",
+        },
+        {
+          tool: "suggest_tools",
+          recommendation: "Registered bash_executor and web_search.",
+          status: "PROVISIONED",
+        },
+      ],
+    });
+
+    render(<ConciergeChat />);
+    const textarea = screen.getByPlaceholderText("Ask Concierge or type 'steer: ...'");
+    const sendBtn = screen.getByRole("button", { name: /Send/i });
+
+    fireEvent.change(textarea, { target: { value: "Search web and suggest bash" } });
+    await act(async () => {
+      fireEvent.click(sendBtn);
+    });
+
+    expect(screen.getByText(/Executed web search and provisioned bash tool/i)).toBeDefined();
+    const receiptsContainer = screen.getByTestId("concierge-action-receipts");
+    expect(receiptsContainer).toBeDefined();
+    expect(receiptsContainer.textContent).toContain("web_search");
+    expect(receiptsContainer.textContent).toContain("bash_executor");
+    expect(receiptsContainer.textContent).toContain("suggest_tools");
+    expect(receiptsContainer.textContent).toContain('Query: "NFL games today"');
+    expect(receiptsContainer.textContent).toContain("Cmd: uname -a");
   });
 
   it("displays animated thinking/processing indicator while awaiting agent response", async () => {

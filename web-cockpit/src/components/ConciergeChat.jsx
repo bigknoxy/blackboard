@@ -265,6 +265,21 @@ export default function ConciergeChat({
                               Backlog: {tc.key} — {tc.title}
                             </div>
                           )}
+                          {tc.query && (
+                            <div className="text-[11px] text-sky-300 font-mono truncate">
+                              Query: "{tc.query}"
+                            </div>
+                          )}
+                          {tc.command && (
+                            <div className="text-[11px] text-amber-300 font-mono truncate">
+                              Cmd: {tc.command}
+                            </div>
+                          )}
+                          {tc.recommendation && (
+                            <div className="text-[10px] text-indigo-300 line-clamp-2">
+                              {tc.recommendation}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -307,6 +322,20 @@ export default function ConciergeChat({
 
         {/* Quick prompt suggestions (one-touch shortcuts for mobile) */}
         <div className="flex items-center gap-1.5 overflow-x-auto py-1.5 no-scrollbar border-t border-slate-800/60">
+          <button
+            type="button"
+            onClick={() => setInput("Can you search the Web? Tell me what today's date is and if there are any NFL games today")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            🌐 Web Search & NFL
+          </button>
+          <button
+            type="button"
+            onClick={() => setInput("We need a bash tool and some web tools. Can you suggest or add them?")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            💻 Bash & Tools Suggestion
+          </button>
           <button
             type="button"
             onClick={() => setInput("steer: prioritize strict typing and robust tests")}
