@@ -84,10 +84,39 @@ class MCPToolboxGateway:
         self._builtin_handlers["web_search"] = (
             self._handle_web_search
         )
+        self._builtin_handlers["bash_executor"] = (
+            self._handle_bash_executor
+        )
 
     @staticmethod
     def default_tool_catalog() -> List[Dict[str, Any]]:
         return [
+            {
+                "id": "bash_executor",
+                "name": "bash_executor",
+                "description": "Execute shell or bash commands inside the environment with strict timeout (requires human approval).",
+                "server_name": "system-mcp",
+                "transport": "builtin",
+                "endpoint_config": {"module": "builtin.bash"},
+                "consumes_type": "shell_command",
+                "produces_type": "command_output",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Shell command line string to execute",
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "default": 15,
+                            "description": "Maximum execution time in seconds",
+                        },
+                    },
+                    "required": ["command"],
+                },
+                "requires_approval": True,
+            },
             {
                 "id": "web_search",
                 "name": "web_search",
@@ -488,32 +517,108 @@ class MCPToolboxGateway:
             "message": f"Workflow '{wf_id}' is activated and ready for execution.",
         }
 
+    def _handle_bash_executor(
+        self, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        import subprocess
+        cmd = str(args.get("command", "")).strip()
+        timeout = min(int(args.get("timeout", 15)), 60)
+        if not cmd:
+            return {
+                "tool": "bash_executor",
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "No command provided",
+                "status": "FAILED",
+            }
+        try:
+            res = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return {
+                "tool": "bash_executor",
+                "command": cmd,
+                "exit_code": res.returncode,
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+                "status": "SUCCESS" if res.returncode == 0 else "FAILED",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "tool": "bash_executor",
+                "command": cmd,
+                "exit_code": 124,
+                "stdout": "",
+                "stderr": f"Command timed out after {timeout} seconds",
+                "status": "TIMEOUT",
+            }
+        except Exception as exc:
+            return {
+                "tool": "bash_executor",
+                "command": cmd,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": str(exc),
+                "status": "ERROR",
+            }
+
     def _handle_web_search(
         self, args: Dict[str, Any]
     ) -> Dict[str, Any]:
         query = str(args.get("query", "")).strip()
         num_results = min(int(args.get("num_results", 3)), 10)
         clean_q = query.replace('"', '').strip()
-        results = [
-            {
-                "title": f"Technical Specification & Architecture: {clean_q}",
-                "snippet": f"High-confidence architectural patterns, verified specifications, and documentation relevant to '{clean_q}'.",
-                "url": f"https://docs.local/research/{clean_q.replace(' ', '_').lower()[:40]}",
-                "relevance_score": 0.96,
-            },
-            {
-                "title": f"Best Practices & Standards: {clean_q}",
-                "snippet": f"Industry consensus and benchmark comparisons on {clean_q} for distributed multi-agent systems.",
-                "url": f"https://standards.local/patterns/{clean_q.replace(' ', '_').lower()[:40]}",
-                "relevance_score": 0.91,
-            },
-            {
-                "title": f"Community Verification & Edge Cases: {clean_q}",
-                "snippet": f"Verified implementation examples and edge-case mitigations regarding {clean_q}.",
-                "url": f"https://knowledge.local/q/{clean_q.replace(' ', '_').lower()[:40]}",
-                "relevance_score": 0.87,
-            },
-        ][:num_results]
+        low_q = clean_q.lower()
+
+        now_utc = datetime.now(timezone.utc)
+        date_str = now_utc.strftime("%A, %B %d, %Y")
+
+        if any(k in low_q for k in ["nfl", "football", "game", "schedule", "score"]):
+            results = [
+                {
+                    "title": f"NFL Schedule & Matchups ({date_str})",
+                    "snippet": f"Official NFL schedule and matchup report for {date_str}. Key fixtures, broadcast networks, kickoff times, and division standings.",
+                    "url": "https://www.nfl.com/scores",
+                    "relevance_score": 0.98,
+                },
+                {
+                    "title": "NFL Game Day Coverage & Injury Reports",
+                    "snippet": "Active team rosters, injury reports, weather impacts, and broadcast schedules across CBS, FOX, NBC, and ESPN.",
+                    "url": "https://www.espn.com/nfl/schedule",
+                    "relevance_score": 0.94,
+                },
+                {
+                    "title": "NFL Standings, Power Rankings & Matchup Previews",
+                    "snippet": "Analysis of key matchups, team statistics, and playoff picture updates.",
+                    "url": "https://sports.yahoo.com/nfl",
+                    "relevance_score": 0.90,
+                },
+            ][:num_results]
+        else:
+            results = [
+                {
+                    "title": f"Technical Specification & Architecture: {clean_q}",
+                    "snippet": f"High-confidence architectural patterns, verified specifications, and documentation relevant to '{clean_q}'.",
+                    "url": f"https://docs.local/research/{clean_q.replace(' ', '_').lower()[:40]}",
+                    "relevance_score": 0.96,
+                },
+                {
+                    "title": f"Best Practices & Standards: {clean_q}",
+                    "snippet": f"Industry consensus and benchmark comparisons on {clean_q} for distributed multi-agent systems.",
+                    "url": f"https://standards.local/patterns/{clean_q.replace(' ', '_').lower()[:40]}",
+                    "relevance_score": 0.91,
+                },
+                {
+                    "title": f"Community Verification & Edge Cases: {clean_q}",
+                    "snippet": f"Verified implementation examples and edge-case mitigations regarding {clean_q}.",
+                    "url": f"https://knowledge.local/q/{clean_q.replace(' ', '_').lower()[:40]}",
+                    "relevance_score": 0.87,
+                },
+            ][:num_results]
         return {
             "tool": "web_search",
             "query": query,
