@@ -24,15 +24,18 @@ describe("BlackboardFeed - Collapsible Cards & Screen Real-Estate Optimization",
     created_at: new Date().toISOString(),
   };
 
-  it("line-clamps long multi-line card content and toggles Show More / Show Less", () => {
+  it("line-clamps long multi-line card content and toggles Show More / Show Less when card is expanded", () => {
     render(
       <BlackboardFeed
-        entries={[sampleLongEntry, sampleShortEntry]}
+        entries={[
+          { ...sampleLongEntry, metadata: { status: "in_progress" } },
+          sampleShortEntry,
+        ]}
         selectedWorkflowId="code_review_pipeline"
       />
     );
 
-    // Long entry should render a Show More button with line count
+    // In-progress long entry defaults to expanded, rendering a Show More button
     const showMoreBtn = screen.getByTestId("show-more-btn");
     expect(showMoreBtn).toBeDefined();
     expect(showMoreBtn.textContent).toContain("Show More");
@@ -50,29 +53,61 @@ describe("BlackboardFeed - Collapsible Cards & Screen Real-Estate Optimization",
     expect(screen.getByTestId("show-more-btn")).toBeDefined();
   });
 
-  it("collapses card into a sleek 1-line summary chip via collapse button and uncollapses it", () => {
+  it("defaults to collapsed unless in progress, expands on click with consistent caret placement", () => {
+    const inProgressEntry = {
+      id: "entry-active-1",
+      workflow_id: "code_review_pipeline",
+      task_id: "task-active",
+      agent_id: "coder",
+      entry_type: "code",
+      content: "const a = 1;",
+      metadata: { status: "in_progress" },
+      created_at: new Date().toISOString(),
+    };
+
+    const completedEntry = {
+      id: "entry-done-2",
+      workflow_id: "code_review_pipeline",
+      task_id: "task-done",
+      agent_id: "architect",
+      entry_type: "spec",
+      content: "Completed spec requirement.",
+      metadata: { status: "completed" },
+      created_at: new Date().toISOString(),
+    };
+
     render(
       <BlackboardFeed
-        entries={[sampleLongEntry]}
+        entries={[inProgressEntry, completedEntry]}
         selectedWorkflowId="code_review_pipeline"
       />
     );
 
-    // Initial state: full card is visible with collapse chevron button ▲
-    const collapseBtn = screen.getByTestId("collapse-card-btn");
-    expect(collapseBtn).toBeDefined();
+    // 1. In-progress entry MUST default to EXPANDED
+    const inProgressCollapseBtn = screen.getByTestId("collapse-card-btn");
+    expect(inProgressCollapseBtn).toBeDefined();
+    expect(inProgressCollapseBtn.textContent).toContain("▲");
+    expect(inProgressCollapseBtn.className).toContain("min-h-[36px]");
+    expect(inProgressCollapseBtn.className).toContain("min-w-[36px]");
+    expect(inProgressCollapseBtn.className).toContain("border-slate-800");
 
-    // Click collapse button
-    fireEvent.click(collapseBtn);
+    // 2. Completed/past entry MUST default to COLLAPSED
+    const completedUncollapseBtn = screen.getByTestId("uncollapse-card-btn");
+    expect(completedUncollapseBtn).toBeDefined();
+    expect(completedUncollapseBtn.textContent).toContain("▼");
+    expect(completedUncollapseBtn.className).toContain("min-h-[36px]");
+    expect(completedUncollapseBtn.className).toContain("min-w-[36px]");
+    expect(completedUncollapseBtn.className).toContain("border-slate-800");
 
-    // Now card is a compact 1-line chip containing uncollapse button ▼
-    const uncollapseBtn = screen.getByTestId("uncollapse-card-btn");
-    expect(uncollapseBtn).toBeDefined();
-    expect(screen.getByText(/@sec-auditor/)).toBeDefined();
+    // 3. User clicks on completed card to look into it ("if im looking into it")
+    fireEvent.click(completedUncollapseBtn);
 
-    // Uncollapse by clicking the button
-    fireEvent.click(uncollapseBtn);
-    expect(screen.getByTestId("collapse-card-btn")).toBeDefined();
+    // Completed card should now be expanded with the matching ▲ button
+    const allCollapseBtns = screen.getAllByTestId("collapse-card-btn");
+    expect(allCollapseBtns.length).toBe(2);
+    expect(allCollapseBtns[1].className).toContain("min-h-[36px]");
+    expect(allCollapseBtns[1].className).toContain("min-w-[36px]");
+    expect(allCollapseBtns[1].className).toContain("border-slate-800");
   });
 
   it("collapses all and expands all cards with master toolbar buttons", () => {
