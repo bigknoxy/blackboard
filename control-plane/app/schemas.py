@@ -401,3 +401,63 @@ class BacklogItemResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+# --- Autonomous Optimizer Schemas ---
+class OptimizerEvaluateRequest(BaseModel):
+    agent_id: str
+    candidate: Dict[str, Any]
+
+
+class OptimizerEvaluateResponse(BaseModel):
+    agent_id: str
+    status: str
+    promoted: bool
+    baseline_fitness: float
+    candidate_fitness: float
+    hypothesis: str
+    metrics: Dict[str, Any]
+
+
+class OptimizerRollbackRequest(BaseModel):
+    force: bool = False
+    regression_threshold: float = 0.05
+
+
+class OptimizerRollbackResponse(BaseModel):
+    agent_id: str
+    action_taken: str  # ROLLED_BACK | NO_ACTION_REQUIRED
+    restored_revision_number: Optional[int] = None
+    system_prompt: Optional[str] = None
+    reason: str
+
+
+class AgentRevisionResponse(BaseModel):
+    id: uuid.UUID
+    agent_id: str
+    revision_number: int
+    system_prompt: str
+    allowed_tools: List[str]
+    inference_config: Dict[str, Any]
+    fitness_score: Optional[float] = None
+    mutation_reason: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OptimizationRunResponse(BaseModel):
+    id: uuid.UUID
+    agent_id: str
+    status: str
+    baseline_fitness: float
+    candidate_fitness: Optional[float] = None
+    hypothesis: str
+    candidate_prompt: Optional[str] = None
+    candidate_tools: List[str]
+    metrics_telemetry: Dict[str, Any]
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+

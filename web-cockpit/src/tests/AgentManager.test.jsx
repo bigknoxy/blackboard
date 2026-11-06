@@ -8,6 +8,33 @@ vi.mock("../api", () => ({
   api: {
     updateAgent: vi.fn().mockResolvedValue({ id: "coder", status: "updated" }),
     createAgent: vi.fn().mockResolvedValue({ id: "tester", status: "created" }),
+    getOptimizerMetrics: vi.fn().mockResolvedValue({
+      fitness_score: 0.9623,
+      qa_pass_rate: 1.0,
+      critique_count: 1,
+    }),
+    listAgentRevisions: vi.fn().mockResolvedValue([
+      {
+        id: "rev-1",
+        agent_id: "coder",
+        revision_number: 1,
+        system_prompt: "Previous prompt",
+        fitness_score: 0.92,
+      },
+    ]),
+    evaluateOptimizerCandidate: vi.fn().mockResolvedValue({
+      agent_id: "architect",
+      status: "PROMOTED",
+      promoted: true,
+      baseline_fitness: 0.90,
+      candidate_fitness: 0.98,
+      hypothesis: "Test hypothesis",
+    }),
+    rollbackOptimizer: vi.fn().mockResolvedValue({
+      agent_id: "architect",
+      action_taken: "ROLLED_BACK",
+      restored_revision_number: 1,
+    }),
   },
 }));
 
@@ -147,5 +174,43 @@ describe("AgentManager - Persona Roster, Model Hot-Swapping & RBAC Editor", () =
         id: "data-analyst",
       })
     );
+  });
+
+  it("displays autonomous optimizer telemetry panel and triggers shadow evaluation and rollback", async () => {
+    const onAgentUpdated = vi.fn();
+    await act(async () => {
+      render(
+        <AgentManager
+          agents={sampleAgents}
+          tools={sampleTools}
+          onAgentUpdated={onAgentUpdated}
+        />
+      );
+    });
+
+    expect(screen.getByTestId("optimizer-telemetry-panel")).toBeDefined();
+    expect(screen.getByText("Autonomous Optimizer (BAO) • Continuous Telemetry")).toBeDefined();
+
+    // Trigger shadow optimization evaluation
+    const shadowOptBtn = screen.getByTestId("run-shadow-opt-btn");
+    await act(async () => {
+      fireEvent.click(shadowOptBtn);
+    });
+
+    expect(api.evaluateOptimizerCandidate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent_id: "architect",
+      })
+    );
+    expect(screen.getByTestId("optimizer-receipt-banner")).toBeDefined();
+
+    // Trigger rollback
+    const rollbackBtn = screen.getByTestId("rollback-agent-btn");
+    await act(async () => {
+      fireEvent.click(rollbackBtn);
+    });
+
+    expect(api.rollbackOptimizer).toHaveBeenCalledWith("architect", { force: true });
+    expect(onAgentUpdated).toHaveBeenCalled();
   });
 });

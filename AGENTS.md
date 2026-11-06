@@ -44,7 +44,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 │       ├── graph.py                 # Blackboard DAG engine, lineage pruning, cycle detection
 │       ├── mcp_gateway.py           # MCP multiplexer, RBAC enforcement, tool chain pathfinder & HITL router
 │       ├── workflow_engine.py       # YAML <-> BPMN 2.0 converter, state machine, pruning & zombie recovery
-│       └── concierge.py             # Concierge Admin Agent (/api/v1/chat) & embedding helper
+│       ├── concierge.py             # Concierge Admin Agent (/api/v1/chat) & embedding helper
+│       └── optimizer.py             # Autonomous Optimizer (BAO), telemetry, shadow sandbox & rollback guard
 ├── agent-worker/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -93,7 +94,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
         ├── test_llm_router_resilience.py
         ├── test_blackboard_dag_engineering.py
         ├── test_agent_profile_hot_swap.py
-        └── test_tools_registry_and_web_search.py
+        ├── test_tools_registry_and_web_search.py
+        └── test_autonomous_optimizer_and_rollback.py
 ```
 
 ---
@@ -112,6 +114,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 10. **Deterministic Tool Chain Pathfinding (Falsifier 10):** `MCPToolboxGateway.resolve_tool_chain` MUST deterministically compute the shortest valid tool composition path using tool `consumes_type` and `produces_type` contracts without model trial-and-error.
 11. **Agent Profile Hot-Swapping & Dynamic RBAC Invalidation (Falsifier 11):** Persona mutations via `PUT /api/v1/agents/{id}` MUST atomically update PostgreSQL, invalidate the Redis cached configuration (`agent:config:{id}`), and immediately enforce new tool RBAC in `MCPToolboxGateway` without service restart.
 12. **MCP Tool Capability Registration & Web Search Execution (Falsifier 12):** Builtin MCP catalog MUST include `web_search` with typed contracts (`consumes_type="search_query"`, `produces_type="search_results"`). Concierge Admin Agent MUST recognize tool registration/addition intents, execute the addition in DB, and output structured `tool_calls_executed` action receipts. Tool invocation must strictly enforce agent RBAC.
+13. **Autonomous Optimization Loop, Decoupled Shadow Sandbox & Safe Rollback Guard (Falsifier 13):** Optimization proposals yielding fitness $\le$ baseline MUST be rejected in the decoupled shadow sandbox as `REJECTED_REGRESSION` without mutating live state. Winning proposals ($\mathcal{F} > \text{baseline}$) MUST snapshot the prior persona into `agent_revisions`, atomically update `agents`, and bust the Redis cache (`agent:config:{id}`). If post-promotion live telemetry registers a regression, `evaluate_live_guard_and_rollback` MUST autonomously revert the agent to the previous snapshot without operator intervention.
+
 
 ---
 
