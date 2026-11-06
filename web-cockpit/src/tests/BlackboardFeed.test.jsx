@@ -72,6 +72,11 @@ describe("BlackboardFeed - Mobile-First Ergonomics & Pagination", () => {
     const cards = screen.getAllByTestId("blackboard-entry-card");
     expect(cards.length).toBe(2);
 
+    // Cards default to collapsed; uncollapse first card to view inspect metadata button
+    const uncollapseBtns = screen.getAllByTestId("uncollapse-card-btn");
+    expect(uncollapseBtns.length).toBeGreaterThan(0);
+    fireEvent.click(uncollapseBtns[0]);
+
     const expandBtns = screen.getAllByTestId("expand-entry-btn");
     expect(expandBtns[0].className).toContain("min-h-[44px]");
     fireEvent.click(expandBtns[0]);

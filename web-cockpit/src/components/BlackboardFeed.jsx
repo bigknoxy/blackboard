@@ -34,7 +34,9 @@ export default function BlackboardFeed({
   const [filterType, setFilterType] = useState("ALL");
   const [page, setPage] = useState(1);
   const [expandedIds, setExpandedIds] = useState({});
-  const [collapsedCardIds, setCollapsedCardIds] = useState({});
+  // Track explicit operator clicks: id -> boolean (true = explicitly expanded, false = explicitly collapsed)
+  // When an id is not in userToggledCards, it defaults to COLLAPSED unless in_progress
+  const [userToggledCards, setUserToggledCards] = useState({});
   const [expandedContentIds, setExpandedContentIds] = useState({});
   const [showSteeringInput, setShowSteeringInput] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
@@ -59,12 +61,67 @@ export default function BlackboardFeed({
     return filteredEntries.slice(startIdx, startIdx + PAGE_SIZE);
   }, [filteredEntries, currentPage]);
 
+  // Detect currently active/running tasks from live stream events
+  const activeTaskIds = useMemo(() => {
+    const active = new Set();
+    const finished = new Set();
+    for (const evt of liveEvents) {
+      const tid = evt.task_id || (evt.data && evt.data.task_id);
+      if (!tid) continue;
+      const name = evt.event || "";
+      if (
+        name.includes("completed") ||
+        name.includes("released") ||
+        name.includes("finish") ||
+        name.includes("failed")
+      ) {
+        finished.add(tid);
+      } else if (
+        name.includes("start") ||
+        name.includes("acquired") ||
+        name.includes("running") ||
+        name.includes("progress")
+      ) {
+        if (!finished.has(tid)) {
+          active.add(tid);
+        }
+      }
+    }
+    return active;
+  }, [liveEvents]);
+
+  function isEntryInProgress(entry) {
+    if (!entry) return false;
+    const meta = entry.metadata_ || entry.metadata || {};
+    if (
+      meta.status === "in_progress" ||
+      meta.status === "running" ||
+      meta.in_progress === true
+    ) {
+      return true;
+    }
+    if (
+      entry.status === "in_progress" ||
+      entry.status === "running" ||
+      entry.in_progress === true
+    ) {
+      return true;
+    }
+    if (entry.task_id && activeTaskIds.has(entry.task_id)) {
+      return true;
+    }
+    return false;
+  }
+
   function toggleExpand(id) {
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
-  function toggleCardCollapse(id) {
-    setCollapsedCardIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  function toggleCardCollapse(id, isCurrentlyExpanded) {
+    setUserToggledCards((prev) => ({
+      ...prev,
+      [id]: !isCurrentlyExpanded,
+    }));
   }
 
   function toggleContentExpand(id) {
@@ -74,17 +131,19 @@ export default function BlackboardFeed({
   function handleCollapseAll() {
     const all = {};
     visibleEntries.forEach((e) => {
-      all[e.id] = true;
+      all[e.id] = false; // explicitly collapsed
     });
-    setCollapsedCardIds(all);
+    setUserToggledCards(all);
   }
 
   function handleExpandAll() {
-    setCollapsedCardIds({});
+    const all = {};
     const allContent = {};
     visibleEntries.forEach((e) => {
+      all[e.id] = true; // explicitly expanded
       allContent[e.id] = true;
     });
+    setUserToggledCards(all);
     setExpandedContentIds(allContent);
   }
 
@@ -292,11 +351,18 @@ export default function BlackboardFeed({
                   const badgeClass =
                     BADGE_STYLES[entry.entry_type] ||
                     "bg-slate-700 text-slate-200 border-slate-600";
+                  const inProgress = isEntryInProgress(entry);
                   const isExpandedMeta = Boolean(expandedIds[entry.id]);
-                  const isCardCollapsed = Boolean(collapsedCardIds[entry.id]);
                   const isContentExpanded = Boolean(expandedContentIds[entry.id]);
+                  const userChoice = userToggledCards[entry.id];
+                  // Defaults to COLLAPSED unless in progress.
+                  // Once not in progress, only expanded if explicitly opened by user ("looking into it").
+                  const isCardExpanded =
+                    userChoice !== undefined ? userChoice : inProgress;
+                  const isCardCollapsed = !isCardExpanded;
                   const lines = entry.content ? entry.content.split("\n") : [];
-                  const isLongContent = lines.length > 4 || (entry.content && entry.content.length > 220);
+                  const isLongContent =
+                    lines.length > 4 || (entry.content && entry.content.length > 220);
 
                   // 1. Sleek 1-line collapsed summary chip
                   if (isCardCollapsed) {
@@ -304,10 +370,10 @@ export default function BlackboardFeed({
                       <article
                         key={entry.id}
                         data-testid="blackboard-entry-card"
-                        className="p-2.5 sm:p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 hover:border-slate-700 transition flex items-center justify-between gap-3 cursor-pointer"
-                        onClick={() => toggleCardCollapse(entry.id)}
+                        className="p-2.5 sm:p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 hover:border-slate-700 transition flex items-center justify-between gap-2 cursor-pointer w-full"
+                        onClick={() => toggleCardCollapse(entry.id, false)}
                       >
-                        <div className="flex items-center gap-2 min-w-0">
+                        <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
                           <span
                             className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border shrink-0 ${badgeClass}`}
                           >
@@ -316,11 +382,17 @@ export default function BlackboardFeed({
                           <span className="text-xs font-semibold text-indigo-300 shrink-0">
                             @{entry.agent_id}
                           </span>
+                          {inProgress && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 shrink-0">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                              In Progress
+                            </span>
+                          )}
                           <span className="text-xs text-slate-400 truncate">
                             {lines[0] || "(empty payload)"}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center gap-2 shrink-0 ml-auto">
                           <span className="text-[11px] text-slate-500 hidden sm:inline font-mono">
                             {entry.created_at
                               ? new Date(entry.created_at).toLocaleTimeString()
@@ -332,9 +404,9 @@ export default function BlackboardFeed({
                             aria-label="Expand entry card"
                             onClick={(e) => {
                               e.stopPropagation();
-                              toggleCardCollapse(entry.id);
+                              toggleCardCollapse(entry.id, false);
                             }}
-                            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 text-xs font-mono"
+                            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 text-xs font-mono transition"
                           >
                             ▼
                           </button>
@@ -350,22 +422,31 @@ export default function BlackboardFeed({
                       data-testid="blackboard-entry-card"
                       className="p-3.5 sm:p-4 rounded-xl bg-slate-950/90 border border-slate-800 hover:border-slate-700 transition"
                     >
-                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                        <div className="flex flex-wrap items-center gap-2">
+                      {/* Consistent Header with Fixed Top-Right Caret Button */}
+                      <div className="flex items-center justify-between gap-2 mb-2.5 w-full">
+                        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1 overflow-hidden">
                           <span
-                            className={`text-[11px] font-mono uppercase px-2 py-0.5 rounded border ${badgeClass}`}
+                            className={`text-[10px] sm:text-[11px] font-mono uppercase px-2 py-0.5 rounded border shrink-0 ${badgeClass}`}
                           >
                             #{entry.entry_type}
                           </span>
-                          <span className="text-xs font-semibold text-indigo-300">
+                          <span className="text-xs font-semibold text-indigo-300 shrink-0">
                             @{entry.agent_id}
                           </span>
-                          <span className="text-xs text-slate-500 font-mono">
-                            {entry.task_id}
-                          </span>
+                          {inProgress && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 shrink-0">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                              In Progress
+                            </span>
+                          )}
+                          {entry.task_id && (
+                            <span className="text-[11px] text-slate-500 font-mono truncate">
+                              {entry.task_id}
+                            </span>
+                          )}
                         </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] text-slate-500 font-mono">
+                        <div className="flex items-center gap-2 shrink-0 ml-auto">
+                          <span className="text-[11px] text-slate-500 hidden sm:inline font-mono">
                             {entry.created_at
                               ? new Date(entry.created_at).toLocaleTimeString()
                               : ""}
@@ -375,8 +456,11 @@ export default function BlackboardFeed({
                             data-testid="collapse-card-btn"
                             aria-label="Collapse entry to 1 line"
                             title="Collapse entry to 1 line"
-                            onClick={() => toggleCardCollapse(entry.id)}
-                            className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white text-xs"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleCardCollapse(entry.id, true);
+                            }}
+                            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 text-xs font-mono transition"
                           >
                             ▲
                           </button>
