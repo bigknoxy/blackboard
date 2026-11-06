@@ -207,4 +207,26 @@ export const api = {
         sourceType
       )}&target_type=${encodeURIComponent(targetType)}`
     ),
+
+  // Autonomous Optimizer (BAO) & Rollback Guard
+  getOptimizerMetrics: (agentId) =>
+    request(`/optimizer/metrics/${encodeURIComponent(agentId)}`),
+  listAgentRevisions: (agentId) =>
+    request(`/optimizer/revisions/${encodeURIComponent(agentId)}`),
+  evaluateOptimizerCandidate: (payload) =>
+    request("/optimizer/evaluate-candidate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  rollbackOptimizer: (agentId, payload = { force: true }) =>
+    request(`/optimizer/rollback-guard/${encodeURIComponent(agentId)}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listOptimizationRuns: (agentId) =>
+    request(
+      agentId
+        ? `/optimizer/runs?agent_id=${encodeURIComponent(agentId)}`
+        : "/optimizer/runs"
+    ),
 };

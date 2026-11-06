@@ -17,28 +17,35 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, func, select, String
+from sqlalchemy import delete, desc, func, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.concierge import compute_embedding, concierge_agent
 from app.database import AsyncSessionLocal, get_db, get_redis, init_db
 from app.graph import BlackboardGraphEngine, GraphCycleException
 from app.mcp_gateway import mcp_gateway
+from app.optimizer import (
+    BlackboardTelemetryCollector,
+    autonomous_optimizer,
+)
 from app.models import (
     AgentMemoryModel,
     AgentModel,
+    AgentRevisionModel,
     BacklogItemModel,
     BlackboardEdgeModel,
     BlackboardEntryModel,
     BlackboardNodeModel,
     HITLTicketModel,
     MCPToolModel,
+    OptimizationRunModel,
     WorkflowModel,
     WorkflowRunModel,
 )
 from app.schemas import (
     AgentCreate,
     AgentResponse,
+    AgentRevisionResponse,
     AgentUpdate,
     BacklogItemCreate,
     BacklogItemResponse,
@@ -63,6 +70,11 @@ from app.schemas import (
     MemoryCreate,
     MemoryResponse,
     MemorySearchRequest,
+    OptimizationRunResponse,
+    OptimizerEvaluateRequest,
+    OptimizerEvaluateResponse,
+    OptimizerRollbackRequest,
+    OptimizerRollbackResponse,
     SteeringCreate,
     ToolChainResponse,
     ToolInvokeRequest,
@@ -2045,6 +2057,113 @@ async def get_backlog_artifacts(
             )
     return filtered
 
+
+# ============================================================================
+# Autonomous Optimizer (BAO) Endpoints (Falsifier 13)
+# ============================================================================
+
+@app.post(
+    "/api/v1/optimizer/evaluate-candidate",
+    response_model=OptimizerEvaluateResponse,
+)
+async def evaluate_optimizer_candidate(
+    req: OptimizerEvaluateRequest,
+    session: AsyncSession = Depends(get_db),
+) -> OptimizerEvaluateResponse:
+    """
+    Evaluates candidate persona in shadow sandbox. Rejects regression or
+    atomically snapshots prior state and promotes candidate with Redis cache invalidation.
+    """
+    redis_client = get_redis()
+    try:
+        result = await autonomous_optimizer.evaluate_and_step(
+            agent_id=req.agent_id,
+            candidate=req.candidate,
+            session=session,
+            redis_client=redis_client,
+        )
+        return OptimizerEvaluateResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Optimizer evaluation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/api/v1/optimizer/rollback-guard/{agent_id}",
+    response_model=OptimizerRollbackResponse,
+)
+async def evaluate_rollback_guard(
+    agent_id: str,
+    req: OptimizerRollbackRequest,
+    session: AsyncSession = Depends(get_db),
+) -> OptimizerRollbackResponse:
+    """
+    Autonomous Rollback Guard (Falsifier 13.3). Checks live telemetry; if regression
+    is detected, autonomously rolls back to previous snapshot in agent_revisions.
+    """
+    redis_client = get_redis()
+    try:
+        result = await autonomous_optimizer.evaluate_live_guard_and_rollback(
+            agent_id=agent_id,
+            session=session,
+            redis_client=redis_client,
+            regression_threshold=req.regression_threshold,
+            force=req.force,
+        )
+        return OptimizerRollbackResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Rollback guard evaluation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/optimizer/metrics/{agent_id}")
+async def get_agent_optimizer_metrics(
+    agent_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Returns telemetry metrics and composite fitness score for an agent."""
+    collector = BlackboardTelemetryCollector(session=session)
+    return await collector.collect_agent_metrics(agent_id=agent_id)
+
+
+@app.get(
+    "/api/v1/optimizer/revisions/{agent_id}",
+    response_model=List[AgentRevisionResponse],
+)
+async def list_agent_revisions(
+    agent_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> List[AgentRevisionResponse]:
+    """Returns historical revision snapshots for rollback tracking."""
+    stmt = (
+        select(AgentRevisionModel)
+        .where(AgentRevisionModel.agent_id == agent_id)
+        .order_by(desc(AgentRevisionModel.revision_number))
+    )
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+@app.get(
+    "/api/v1/optimizer/runs",
+    response_model=List[OptimizationRunResponse],
+)
+async def list_optimization_runs(
+    agent_id: Optional[str] = None,
+    limit: int = 50,
+    session: AsyncSession = Depends(get_db),
+) -> List[OptimizationRunResponse]:
+    """Lists recent optimization runs with hypotheses and promotion/rejection status."""
+    stmt = select(OptimizationRunModel).order_by(desc(OptimizationRunModel.created_at))
+    if agent_id:
+        stmt = stmt.where(OptimizationRunModel.agent_id == agent_id)
+    stmt = stmt.limit(limit)
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
 
 
 @app.websocket("/ws/blackboard")

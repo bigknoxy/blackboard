@@ -6,8 +6,10 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
 )
@@ -325,4 +327,73 @@ class BacklogItemModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
+
+
+class AgentRevisionModel(Base):
+    __tablename__ = "agent_revisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    revision_number: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed_tools: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    inference_config: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    fitness_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mutation_reason: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="autonomous_promotion"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+
+
+class OptimizationRunModel(Base):
+    __tablename__ = "optimization_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="ANALYZING", index=True
+    )  # ANALYZING | SHADOW_TESTING | PROMOTED | REJECTED_REGRESSION | ROLLED_BACK
+    baseline_fitness: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
+    candidate_fitness: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+    hypothesis: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    candidate_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    candidate_tools: Mapped[List[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    metrics_telemetry: Mapped[Dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
 

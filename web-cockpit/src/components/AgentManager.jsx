@@ -34,6 +34,11 @@ export default function AgentManager({
   const [newAgentRole, setNewAgentRole] = useState("");
   const [newAgentPrompt, setNewAgentPrompt] = useState("");
   const [creating, setCreating] = useState(false);
+  const [optimizerMetrics, setOptimizerMetrics] = useState(null);
+  const [revisions, setRevisions] = useState([]);
+  const [runningOpt, setRunningOpt] = useState(false);
+  const [optReceipt, setOptReceipt] = useState(null);
+  const [rollingBack, setRollingBack] = useState(false);
 
   const selectedAgent = agents.find((a) => a.id === selectedAgentId);
 
@@ -49,6 +54,14 @@ export default function AgentManager({
       setEditTemperature(cfg.temperature ?? 0.2);
       setEditAllowedTools(selectedAgent.allowed_tools || []);
       setSaveStatus(null);
+      setOptReceipt(null);
+
+      api.getOptimizerMetrics(selectedAgent.id)
+        .then(setOptimizerMetrics)
+        .catch(() => setOptimizerMetrics(null));
+      api.listAgentRevisions(selectedAgent.id)
+        .then(setRevisions)
+        .catch(() => setRevisions([]));
     }
   }, [selectedAgentId, selectedAgent]);
 
@@ -64,6 +77,66 @@ export default function AgentManager({
     setEditModelName(preset.label);
     setEditProvider(preset.provider);
     setEditBaseUrl(preset.url);
+  }
+
+  async function handleRollback() {
+    if (!selectedAgent) return;
+    setRollingBack(true);
+    try {
+      const res = await api.rollbackOptimizer(selectedAgent.id, { force: true });
+      setSaveStatus({
+        ok: true,
+        msg: `Rollback succeeded: restored to revision #${res.restored_revision_number}`,
+      });
+      if (onAgentUpdated) await onAgentUpdated();
+      const updatedMetrics = await api.getOptimizerMetrics(selectedAgent.id);
+      setOptimizerMetrics(updatedMetrics);
+      const updatedRevs = await api.listAgentRevisions(selectedAgent.id);
+      setRevisions(updatedRevs);
+    } catch (err) {
+      setSaveStatus({ ok: false, msg: `Rollback failed: ${err.message}` });
+    } finally {
+      setRollingBack(false);
+    }
+  }
+
+  async function handleRunShadowOptimization() {
+    if (!selectedAgent) return;
+    setRunningOpt(true);
+    setOptReceipt(null);
+    try {
+      const candidate = {
+        system_prompt: `${editPrompt}\nStrict invariant: validate all inputs and verify via AST analyzer.`,
+        allowed_tools: editAllowedTools,
+        mock_shadow_qa_pass_rate: 1.0,
+        mock_shadow_critique_ratio: 0.0,
+      };
+      const res = await api.evaluateOptimizerCandidate({
+        agent_id: selectedAgent.id,
+        candidate,
+      });
+      setOptReceipt(res);
+      if (res.promoted) {
+        setSaveStatus({
+          ok: true,
+          msg: `Autonomous Optimizer: Promoted new persona (Fitness: ${res.candidate_fitness} > Baseline: ${res.baseline_fitness})`,
+        });
+        if (onAgentUpdated) await onAgentUpdated();
+      } else {
+        setSaveStatus({
+          ok: false,
+          msg: `Autonomous Optimizer: Candidate rejected due to regression (Fitness: ${res.candidate_fitness} <= Baseline: ${res.baseline_fitness})`,
+        });
+      }
+      const updatedMetrics = await api.getOptimizerMetrics(selectedAgent.id);
+      setOptimizerMetrics(updatedMetrics);
+      const updatedRevs = await api.listAgentRevisions(selectedAgent.id);
+      setRevisions(updatedRevs);
+    } catch (err) {
+      setSaveStatus({ ok: false, msg: `Optimization run failed: ${err.message}` });
+    } finally {
+      setRunningOpt(false);
+    }
   }
 
   async function handleSaveProfile(e) {
@@ -243,6 +316,123 @@ export default function AgentManager({
                   {saveStatus.msg}
                 </div>
               )}
+
+              {/* Autonomous Optimizer (BAO) & Telemetry Card */}
+              <div
+                data-testid="optimizer-telemetry-panel"
+                className="p-3.5 rounded-xl bg-slate-950/80 border border-indigo-900/40 shadow-inner space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                    <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">
+                      Autonomous Optimizer (BAO) &bull; Continuous Telemetry
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-800 text-emerald-300">
+                    Loop Active
+                  </span>
+                </div>
+
+                {/* Metrics Pill Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5">
+                    <div className="text-[10px] text-slate-400 uppercase tracking-wider font-mono">
+                      Fitness (𝓕)
+                    </div>
+                    <div
+                      data-testid="agent-fitness-score"
+                      className="text-base font-bold text-emerald-400 font-mono mt-0.5"
+                    >
+                      {optimizerMetrics ? optimizerMetrics.fitness_score : "—"}
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5">
+                    <div className="text-[10px] text-slate-400 uppercase tracking-wider font-mono">
+                      QA Pass Rate
+                    </div>
+                    <div className="text-base font-bold text-slate-200 font-mono mt-0.5">
+                      {optimizerMetrics
+                        ? `${Math.round(optimizerMetrics.qa_pass_rate * 100)}%`
+                        : "—"}
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5">
+                    <div className="text-[10px] text-slate-400 uppercase tracking-wider font-mono">
+                      Critiques
+                    </div>
+                    <div className="text-base font-bold text-amber-300 font-mono mt-0.5">
+                      {optimizerMetrics ? optimizerMetrics.critique_count : "0"}
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5">
+                    <div className="text-[10px] text-slate-400 uppercase tracking-wider font-mono">
+                      Snapshots
+                    </div>
+                    <div className="text-base font-bold text-indigo-300 font-mono mt-0.5">
+                      {revisions.length}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Optimizer Action Buttons */}
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    data-testid="run-shadow-opt-btn"
+                    disabled={runningOpt}
+                    onClick={handleRunShadowOptimization}
+                    className="min-h-[44px] px-3 py-2 bg-indigo-950/80 hover:bg-indigo-900/90 border border-indigo-700/60 text-indigo-200 text-xs font-semibold rounded-lg transition flex items-center gap-1.5"
+                  >
+                    <span>⚡</span>
+                    <span>{runningOpt ? "Evaluating..." : "Run Shadow Optimization"}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    data-testid="rollback-agent-btn"
+                    disabled={rollingBack || revisions.length === 0}
+                    onClick={handleRollback}
+                    className={`min-h-[44px] px-3 py-2 text-xs font-semibold rounded-lg transition flex items-center gap-1.5 border ${
+                      revisions.length > 0
+                        ? "bg-rose-950/70 hover:bg-rose-900/80 border-rose-800 text-rose-200 cursor-pointer"
+                        : "bg-slate-900/50 border-slate-800 text-slate-600 cursor-not-allowed"
+                    }`}
+                  >
+                    <span>↩</span>
+                    <span>
+                      {rollingBack
+                        ? "Restoring..."
+                        : `Rollback (${revisions.length} snapshots)`}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Optimization Receipt Card */}
+                {optReceipt && (
+                  <div
+                    data-testid="optimizer-receipt-banner"
+                    className={`p-3 rounded-lg border text-xs font-mono space-y-1 ${
+                      optReceipt.promoted
+                        ? "bg-emerald-950/50 border-emerald-700/60 text-emerald-200"
+                        : "bg-amber-950/50 border-amber-700/60 text-amber-200"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between font-semibold">
+                      <span>Receipt: {optReceipt.status}</span>
+                      <span>
+                        𝓕: {optReceipt.candidate_fitness} (base: {optReceipt.baseline_fitness})
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-300">
+                      {optReceipt.hypothesis}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* Name & Role Fields */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
