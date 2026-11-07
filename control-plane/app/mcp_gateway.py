@@ -885,6 +885,14 @@ class MCPToolboxGateway:
 
         tool = await session.get(MCPToolModel, req.tool_id)
         if not tool:
+            for tool_def in self.default_tool_catalog():
+                if tool_def["id"] == req.tool_id:
+                    tool = MCPToolModel(**tool_def)
+                    session.add(tool)
+                    await session.commit()
+                    await session.refresh(tool)
+                    break
+        if not tool:
             return ToolInvokeResponse(
                 status="ERROR",
                 message=f"Tool '{req.tool_id}' is not registered in MCP Gateway.",

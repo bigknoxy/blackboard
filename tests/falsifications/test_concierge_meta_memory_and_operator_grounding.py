@@ -148,6 +148,9 @@ async def test_falsifier_15_hitl_bash_approval_result(db_session):
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
+        # Seed tools catalog if empty in test session
+        await client.get("/api/v1/tools")
+
         # 1. Queue a bash tool execution requiring approval
         invoke_res = await client.post(
             "/api/v1/tools/invoke",
