@@ -290,6 +290,12 @@ export default function ConciergeChat({
                               {tc.recommendation}
                             </div>
                           )}
+                          {tc.policy_type && (
+                            <div className="text-[11px] text-purple-300 font-mono truncate">
+                              Policy: <span className="text-white font-bold">{tc.policy_type}</span>
+                              {tc.pattern && <span className="text-emerald-400 ml-1">({tc.pattern})</span>}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -332,6 +338,20 @@ export default function ConciergeChat({
 
         {/* Quick prompt suggestions (one-touch shortcuts for mobile) */}
         <div className="flex items-center gap-1.5 overflow-x-auto py-1.5 no-scrollbar border-t border-slate-800/60">
+          <button
+            type="button"
+            onClick={() => setInput("Permanently approve bash commands starting with git")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            🛡️ Trust Git Commands
+          </button>
+          <button
+            type="button"
+            onClick={() => setInput("Create a new tool named 'system_uptime_checker' with description 'Inspect host uptime' using command 'uptime' and assign it to architect.")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            ⚡ Synthesize Tool
+          </button>
           <button
             type="button"
             onClick={() => setInput("Do you have memory? What are your stored memories across agents?")}

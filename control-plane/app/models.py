@@ -400,3 +400,39 @@ class OptimizationRunModel(Base):
     )
 
 
+class ApprovalPolicyModel(Base):
+    __tablename__ = "approval_policies"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    policy_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )  # tool | command_pattern | workflow_node
+    tool_id: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    agent_id: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True
+    )
+    workflow_id: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    node_id: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True
+    )
+    pattern: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    created_by: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="operator"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     AgentMemoryModel,
     AgentModel,
+    ApprovalPolicyModel,
     BacklogItemModel,
     BlackboardEntryModel,
     HITLTicketModel,
@@ -144,6 +145,14 @@ class ConciergeAdminAgent:
         {
             "name": "search_memories",
             "description": "Execute semantic vector similarity search against stored agent memories.",
+        },
+        {
+            "name": "create_dynamic_tool",
+            "description": "Synthesize and register a new executable MCP tool into PostgreSQL and bind it to an agent.",
+        },
+        {
+            "name": "manage_approval_policy",
+            "description": "Create, list, or revoke permanent auto-approval policies for tools, command patterns, or workflow steps.",
         },
     ]
 
@@ -350,7 +359,7 @@ class ConciergeAdminAgent:
         if any(
             k in lowered for k in [
                 "add tool", "add tools", "web search", "web_search",
-                "create tool", "register tool", "add web_search",
+                "register tool", "add web_search",
                 "need a tool", "need tools", "suggest tool", "suggest tools",
                 "what tools do you suggest", "what tools should we have",
                 "bash tool", "web tool", "add bash", "need a bash", "need bash",
@@ -415,6 +424,155 @@ class ConciergeAdminAgent:
                     "suggested": ["bash_executor", "web_search", "repo_search"],
                     "status": "PROVISIONED",
                     "recommendation": "Registered bash_executor (sandboxed execution with HITL approval gate) and web_search (external intelligence).",
+                })
+
+        # Autonomous Dynamic Tool Synthesis Intent (Invariant 16)
+        if any(
+            k in lowered for k in [
+                "create a new tool", "create new tool", "create tool",
+                "synthesize a new tool", "synthesize new tool", "synthesize tool",
+                "build tool", "make a tool", "make tool"
+            ]
+        ):
+            import re
+            name_match = re.search(r"(?:named|called)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", msg, re.IGNORECASE)
+            if not name_match:
+                name_match = re.search(r"tool\s+['\"]([a-zA-Z0-9_\-]+)['\"]", msg, re.IGNORECASE)
+            if not name_match:
+                name_match = re.search(r"tool\s+([a-zA-Z0-9_\-]+)", msg, re.IGNORECASE)
+            t_id = name_match.group(1).lower() if name_match else f"custom_tool_{int(datetime.now().timestamp())}"
+            desc_match = re.search(r"description\s+['\"]([^'\"]+)['\"]", msg, re.IGNORECASE)
+            t_desc = desc_match.group(1) if desc_match else f"Dynamically synthesized tool {t_id}"
+            cmd_match = re.search(r"(?:command|using command|running|runs)\s+['\"]([^'\"]+)['\"]", msg, re.IGNORECASE)
+            t_cmd = cmd_match.group(1) if cmd_match else f"echo 'Dynamic execution for {t_id}'"
+            target_agent_id = "architect"
+            for ag_cand in ["coder", "architect", "qa-tester", "sec-auditor", "researcher"]:
+                if ag_cand in lowered:
+                    target_agent_id = ag_cand
+                    break
+
+            existing_t = await session.get(MCPToolModel, t_id)
+            if not existing_t:
+                existing_t = MCPToolModel(
+                    id=t_id,
+                    name=t_id,
+                    description=t_desc,
+                    server_name="dynamic-mcp",
+                    transport="builtin",
+                    endpoint_config={"bash_command": t_cmd},
+                    input_schema={"type": "object", "properties": {}},
+                    consumes_type="query_keyword",
+                    produces_type="command_output",
+                    requires_approval=True,
+                )
+                session.add(existing_t)
+                await session.commit()
+                await session.refresh(existing_t)
+
+            target_agent = await session.get(AgentModel, target_agent_id)
+            if target_agent:
+                if t_id not in (target_agent.allowed_tools or []):
+                    target_agent.allowed_tools = list(target_agent.allowed_tools or []) + [t_id]
+                    await session.commit()
+                    r = get_redis()
+                    await r.delete(f"agent:config:{target_agent.id}")
+
+            tool_calls_executed.append({
+                "tool": "create_dynamic_tool",
+                "tool_id": t_id,
+                "name": t_id,
+                "description": t_desc,
+                "command": t_cmd,
+                "assigned_to": target_agent_id,
+                "status": "SYNTHESIZED_AND_ASSIGNED",
+            })
+
+        # Dynamic Approval Policy Management Intent (Invariant 16)
+        if any(
+            k in lowered for k in [
+                "permanently approve", "permanently trust", "always allow",
+                "always approve", "auto approve", "auto-approve",
+                "trust tool", "trust step", "automate step", "automate workflow",
+                "approval policies", "show policies", "list policies", "revoke policy"
+            ]
+        ):
+            from app.models import ApprovalPolicyModel
+            import re
+
+            if any(k in lowered for k in ["show", "list", "view"]):
+                stmt = select(ApprovalPolicyModel).order_by(ApprovalPolicyModel.created_at.desc())
+                res = await session.execute(stmt)
+                all_pols = res.scalars().all()
+                tool_calls_executed.append({
+                    "tool": "manage_approval_policy",
+                    "action": "list_policies",
+                    "count": len(all_pols),
+                    "policies": [
+                        {
+                            "id": str(p.id),
+                            "type": p.policy_type,
+                            "tool_id": p.tool_id,
+                            "workflow_id": p.workflow_id,
+                            "node_id": p.node_id,
+                            "pattern": p.pattern,
+                            "enabled": p.enabled,
+                        }
+                        for p in all_pols
+                    ],
+                })
+            else:
+                p_type = "tool"
+                p_tool = None
+                p_wf = req.workflow_id or "code_review_pipeline"
+                p_node = None
+                p_pattern = None
+
+                if any(k in lowered for k in ["step", "workflow", "stage"]):
+                    p_type = "workflow_node"
+                    step_match = re.search(r"(?:step|stage|node)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", msg, re.IGNORECASE)
+                    p_node = step_match.group(1) if step_match else "stage_hitl_signoff"
+                else:
+                    tool_match = re.search(r"(?:tool|for)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", msg, re.IGNORECASE)
+                    if tool_match:
+                        p_tool = tool_match.group(1)
+                    else:
+                        for cand in ["bash_executor", "production_release_gate", "git_branch_commit", "workflow_activator", "disk_free_inspector"]:
+                            if cand in lowered:
+                                p_tool = cand
+                                break
+                    if not p_tool:
+                        p_tool = "bash_executor"
+
+                    if any(k in lowered for k in ["command", "pattern", "starting with", "starts with"]):
+                        p_type = "command_pattern"
+                        pat_match = re.search(r"(?:pattern|with|starting with)\s+['\"]?([^'\"\n]+)['\"]?", msg, re.IGNORECASE)
+                        p_pattern = pat_match.group(1).strip() if pat_match else "git *"
+                        if not p_pattern.endswith("*"):
+                            p_pattern = f"{p_pattern} *"
+
+                new_pol = ApprovalPolicyModel(
+                    policy_type=p_type,
+                    tool_id=p_tool if p_type in ("tool", "command_pattern") else None,
+                    workflow_id=p_wf if p_type == "workflow_node" else None,
+                    node_id=p_node if p_type == "workflow_node" else None,
+                    pattern=p_pattern,
+                    enabled=True,
+                    created_by="concierge",
+                )
+                session.add(new_pol)
+                await session.commit()
+                await session.refresh(new_pol)
+
+                tool_calls_executed.append({
+                    "tool": "manage_approval_policy",
+                    "action": "create_policy",
+                    "policy_id": str(new_pol.id),
+                    "policy_type": p_type,
+                    "tool_id": p_tool,
+                    "workflow_id": p_wf if p_type == "workflow_node" else None,
+                    "node_id": p_node,
+                    "pattern": p_pattern,
+                    "status": "ACTIVE",
                 })
 
         # Autonomous Web Search Execution Intent

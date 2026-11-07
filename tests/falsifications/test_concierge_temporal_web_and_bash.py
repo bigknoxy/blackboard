@@ -81,6 +81,11 @@ async def test_falsifier_14_bash_tool_registration_and_hitl(db_session):
         tool_ids = [t["id"] for t in tools_list]
         assert "bash_executor" in tool_ids, f"'bash_executor' missing from MCP tools catalog: {tool_ids}"
 
+        from app.models import ApprovalPolicyModel
+        from sqlalchemy import delete
+        await db_session.execute(delete(ApprovalPolicyModel).where(ApprovalPolicyModel.tool_id == "bash_executor"))
+        await db_session.commit()
+
         bash_tool = next(t for t in tools_list if t["id"] == "bash_executor")
         assert bash_tool["consumes_type"] == "shell_command"
         assert bash_tool["produces_type"] == "command_output"

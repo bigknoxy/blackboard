@@ -898,7 +898,43 @@ class MCPToolboxGateway:
                 message=f"Tool '{req.tool_id}' is not registered in MCP Gateway.",
             )
 
+        # Check active auto-approval policies (Invariant 16)
+        auto_approved = False
+        auto_approve_policy_matched = None
         if tool.requires_approval and not req.bypass_approval:
+            from app.models import ApprovalPolicyModel
+            import fnmatch
+
+            stmt = select(ApprovalPolicyModel).where(
+                ApprovalPolicyModel.enabled == True,
+                (ApprovalPolicyModel.tool_id == tool.id) | (ApprovalPolicyModel.tool_id.is_(None)),
+            )
+            pol_result = await session.execute(stmt)
+            policies = pol_result.scalars().all()
+
+            for pol in policies:
+                if pol.agent_id and pol.agent_id != req.agent_id:
+                    continue
+                if pol.workflow_id and pol.workflow_id != req.workflow_id:
+                    continue
+
+                if pol.policy_type == "tool":
+                    auto_approved = True
+                    auto_approve_policy_matched = pol
+                    break
+
+                elif pol.policy_type == "command_pattern":
+                    cmd = str(req.arguments.get("command", "")).strip()
+                    pattern = (pol.pattern or "").strip()
+                    if pattern and (
+                        fnmatch.fnmatch(cmd, pattern)
+                        or (pattern.endswith("*") and cmd.startswith(pattern[:-1]))
+                    ):
+                        auto_approved = True
+                        auto_approve_policy_matched = pol
+                        break
+
+        if tool.requires_approval and not req.bypass_approval and not auto_approved:
             ticket = HITLTicketModel(
                 workflow_id=req.workflow_id,
                 task_id=req.task_id,
@@ -952,6 +988,26 @@ class MCPToolboxGateway:
                 ),
             )
 
+        if auto_approved and auto_approve_policy_matched:
+            auto_entry = BlackboardEntryModel(
+                workflow_id=req.workflow_id,
+                task_id=req.task_id,
+                agent_id=req.agent_id,
+                entry_type="test_result",
+                content=(
+                    f"🛡️ Auto-Approved Tool Execution: Tool `{tool.id}` executed via active "
+                    f"policy `{auto_approve_policy_matched.policy_type}` (ID: {auto_approve_policy_matched.id})."
+                ),
+                metadata_={
+                    "auto_approved": True,
+                    "policy_id": str(auto_approve_policy_matched.id),
+                    "policy_type": auto_approve_policy_matched.policy_type,
+                },
+            )
+            session.add(auto_entry)
+            await session.commit()
+
+
         # Execute tool via configured transport
         try:
             output = await self._dispatch_tool_execution(tool, req.arguments)
@@ -974,6 +1030,29 @@ class MCPToolboxGateway:
             handler = self._builtin_handlers.get(tool.id)
             if handler:
                 return handler(arguments)
+            cfg = tool.endpoint_config or {}
+            if cfg.get("bash_command") or cfg.get("command"):
+                cmd = str(cfg.get("bash_command") or cfg.get("command"))
+                for k, v in arguments.items():
+                    cmd = cmd.replace(f"{{{k}}}", str(v))
+                import subprocess
+                try:
+                    proc = subprocess.run(
+                        ["/bin/bash", "-c", cmd],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                    return {
+                        "tool": tool.id,
+                        "command": cmd,
+                        "exit_code": proc.returncode,
+                        "stdout": proc.stdout.strip(),
+                        "stderr": proc.stderr.strip(),
+                        "status": "EXECUTED" if proc.returncode == 0 else "ERROR",
+                    }
+                except Exception as exc:
+                    return {"tool": tool.id, "status": "ERROR", "error": str(exc)}
             return {
                 "tool": tool.id,
                 "status": "EXECUTED",

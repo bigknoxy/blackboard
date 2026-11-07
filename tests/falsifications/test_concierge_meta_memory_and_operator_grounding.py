@@ -151,6 +151,11 @@ async def test_falsifier_15_hitl_bash_approval_result(db_session):
         # Seed tools catalog if empty in test session
         await client.get("/api/v1/tools")
 
+        from app.models import ApprovalPolicyModel
+        from sqlalchemy import delete
+        await db_session.execute(delete(ApprovalPolicyModel).where(ApprovalPolicyModel.tool_id == "bash_executor"))
+        await db_session.commit()
+
         # 1. Queue a bash tool execution requiring approval
         invoke_res = await client.post(
             "/api/v1/tools/invoke",

@@ -130,13 +130,32 @@ export const api = {
         ? `/blackboard/hitl?status=${encodeURIComponent(status)}`
         : "/blackboard/hitl"
     ),
-  decideHitlTicket: (ticketId, decision, reviewerComment = "") =>
+  decideHitlTicket: (ticketId, decision, reviewerComment = "", autoApprovePolicy = null, pattern = null) =>
     request(`/blackboard/hitl/${ticketId}/decide`, {
       method: "POST",
       body: JSON.stringify({
         decision,
         reviewer_comment: reviewerComment,
+        auto_approve_policy: autoApprovePolicy,
+        pattern: pattern,
       }),
+    }),
+
+  // Auto-Approval Policies (Invariant 16)
+  listApprovalPolicies: (policyType) =>
+    request(
+      policyType
+        ? `/approvals/policies?policy_type=${encodeURIComponent(policyType)}`
+        : "/approvals/policies"
+    ),
+  createApprovalPolicy: (payload) =>
+    request("/approvals/policies", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteApprovalPolicy: (policyId) =>
+    request(`/approvals/policies/${policyId}`, {
+      method: "DELETE",
     }),
 
   // Concierge Admin Agent

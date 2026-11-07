@@ -300,6 +300,40 @@ class WorkflowRunResponse(BaseModel):
 class HITLDecisionRequest(BaseModel):
     decision: Literal["APPROVED", "REJECTED"]
     reviewer_comment: Optional[str] = None
+    auto_approve_policy: Optional[Literal["tool", "command_pattern", "workflow_node"]] = None
+    pattern: Optional[str] = None
+
+
+class ApprovalPolicyCreate(BaseModel):
+    policy_type: Literal["tool", "command_pattern", "workflow_node"]
+    tool_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    node_id: Optional[str] = None
+    pattern: Optional[str] = None
+    enabled: bool = True
+    created_by: str = "operator"
+
+
+class ApprovalPolicyUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    pattern: Optional[str] = None
+
+
+class ApprovalPolicyResponse(BaseModel):
+    id: uuid.UUID
+    policy_type: str
+    tool_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    node_id: Optional[str] = None
+    pattern: Optional[str] = None
+    enabled: bool
+    created_by: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
 
 
 class HITLTicketResponse(BaseModel):
