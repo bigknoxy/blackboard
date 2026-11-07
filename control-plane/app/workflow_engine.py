@@ -565,6 +565,40 @@ class WorkflowEngine:
             return
 
         if ntype == "UserTask":
+            # Check active workflow node auto-approval policy (Invariant 16)
+            from app.models import ApprovalPolicyModel
+            pol_stmt = select(ApprovalPolicyModel).where(
+                ApprovalPolicyModel.enabled == True,
+                ApprovalPolicyModel.policy_type == "workflow_node",
+                ApprovalPolicyModel.workflow_id == workflow.id,
+                ApprovalPolicyModel.node_id == nid,
+            )
+            pol_res = await session.execute(pol_stmt)
+            node_policy = pol_res.scalar_one_or_none()
+
+            if node_policy:
+                auto_entry = BlackboardEntryModel(
+                    workflow_id=workflow.id,
+                    task_id=f"run-{run.id}-{nid}",
+                    agent_id="workflow-engine",
+                    entry_type="test_result",
+                    content=(
+                        f"🛡️ Auto-Approved Workflow Step: Step '{node.get('name', nid)}' (`{nid}`) "
+                        f"automatically approved via active policy (ID: {node_policy.id})."
+                    ),
+                    metadata_={
+                        "auto_approved": True,
+                        "policy_id": str(node_policy.id),
+                        "node_id": nid,
+                    },
+                )
+                session.add(auto_entry)
+                await session.flush()
+                await self.advance_from_node(
+                    session, workflow, run, nid, branch_outcome="PASS"
+                )
+                return
+
             current = list(run.current_nodes or [])
             if nid not in current:
                 current.append(nid)

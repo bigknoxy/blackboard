@@ -32,6 +32,7 @@ from app.models import (
     AgentMemoryModel,
     AgentModel,
     AgentRevisionModel,
+    ApprovalPolicyModel,
     BacklogItemModel,
     BlackboardEdgeModel,
     BlackboardEntryModel,
@@ -47,6 +48,9 @@ from app.schemas import (
     AgentResponse,
     AgentRevisionResponse,
     AgentUpdate,
+    ApprovalPolicyCreate,
+    ApprovalPolicyResponse,
+    ApprovalPolicyUpdate,
     BacklogItemCreate,
     BacklogItemResponse,
     BacklogItemUpdate,
@@ -1401,6 +1405,28 @@ async def decide_hitl_ticket(
                     run.status = "FAILED"
                     await session.commit()
 
+    # Automatically create permanent approval policy if requested (Invariant 16)
+    if payload.decision == "APPROVED" and payload.auto_approve_policy:
+        pol_type = payload.auto_approve_policy
+        p_pattern = payload.pattern
+        if pol_type == "command_pattern" and not p_pattern and ticket.tool_id == "bash_executor":
+            cmd = str(ticket.tool_arguments.get("command", "")).strip()
+            first_word = cmd.split()[0] if cmd else "cmd"
+            p_pattern = f"{first_word} *"
+
+        auto_pol = ApprovalPolicyModel(
+            policy_type=pol_type,
+            tool_id=ticket.tool_id if pol_type in ("tool", "command_pattern") else None,
+            agent_id=ticket.agent_id if pol_type == "tool" else None,
+            workflow_id=ticket.workflow_id if pol_type == "workflow_node" else None,
+            node_id=ticket.tool_id if pol_type == "workflow_node" else None,
+            pattern=p_pattern,
+            enabled=True,
+            created_by="operator",
+        )
+        session.add(auto_pol)
+        await session.commit()
+
     await workflow_engine._publish_event(
         {
             "event": "hitl.ticket_resolved",
@@ -1414,6 +1440,88 @@ async def decide_hitl_ticket(
         }
     )
     return ticket
+
+
+# --- Auto-Approval Policies Endpoints (Invariant 16) ---
+@app.get("/api/v1/approvals/policies", response_model=List[ApprovalPolicyResponse])
+async def list_approval_policies(
+    policy_type: Optional[str] = Query(default=None),
+    tool_id: Optional[str] = Query(default=None),
+    workflow_id: Optional[str] = Query(default=None),
+    enabled: Optional[bool] = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+) -> List[ApprovalPolicyModel]:
+    stmt = select(ApprovalPolicyModel).order_by(ApprovalPolicyModel.created_at.desc())
+    if policy_type:
+        stmt = stmt.where(ApprovalPolicyModel.policy_type == policy_type)
+    if tool_id:
+        stmt = stmt.where(ApprovalPolicyModel.tool_id == tool_id)
+    if workflow_id:
+        stmt = stmt.where(ApprovalPolicyModel.workflow_id == workflow_id)
+    if enabled is not None:
+        stmt = stmt.where(ApprovalPolicyModel.enabled == enabled)
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+@app.post(
+    "/api/v1/approvals/policies",
+    response_model=ApprovalPolicyResponse,
+    status_code=201,
+)
+async def create_approval_policy(
+    payload: ApprovalPolicyCreate,
+    session: AsyncSession = Depends(get_db),
+) -> ApprovalPolicyModel:
+    policy = ApprovalPolicyModel(
+        policy_type=payload.policy_type,
+        tool_id=payload.tool_id,
+        agent_id=payload.agent_id,
+        workflow_id=payload.workflow_id,
+        node_id=payload.node_id,
+        pattern=payload.pattern,
+        enabled=payload.enabled,
+        created_by=payload.created_by,
+    )
+    session.add(policy)
+    await session.commit()
+    await session.refresh(policy)
+    return policy
+
+
+@app.patch(
+    "/api/v1/approvals/policies/{policy_id}",
+    response_model=ApprovalPolicyResponse,
+)
+async def update_approval_policy(
+    policy_id: uuid.UUID,
+    payload: ApprovalPolicyUpdate,
+    session: AsyncSession = Depends(get_db),
+) -> ApprovalPolicyModel:
+    policy = await session.get(ApprovalPolicyModel, policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found.")
+    if payload.enabled is not None:
+        policy.enabled = payload.enabled
+    if payload.pattern is not None:
+        policy.pattern = payload.pattern
+    await session.commit()
+    await session.refresh(policy)
+    return policy
+
+
+@app.delete("/api/v1/approvals/policies/{policy_id}")
+async def delete_approval_policy(
+    policy_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    policy = await session.get(ApprovalPolicyModel, policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found.")
+    await session.delete(policy)
+    await session.commit()
+    return {"status": "deleted", "policy_id": str(policy_id)}
+
 
 
 # ==============================================================================

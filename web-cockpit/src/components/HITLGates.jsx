@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { api } from "../api";
 
 export default function HITLGates({
@@ -13,6 +13,33 @@ export default function HITLGates({
   const [filter, setFilter] = useState("all"); // 'all' | 'pending' | 'approved' | 'rejected'
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedIds, setExpandedIds] = useState({});
+  const [policies, setPolicies] = useState([]);
+  const [showPolicies, setShowPolicies] = useState(false);
+  const [selectedPolicyMode, setSelectedPolicyMode] = useState("once"); // 'once' | 'tool' | 'pattern' | 'workflow_node'
+  const [customPattern, setCustomPattern] = useState("");
+
+  useEffect(() => {
+    loadPolicies();
+  }, []);
+
+  async function loadPolicies() {
+    try {
+      const data = await api.listApprovalPolicies();
+      setPolicies(Array.isArray(data) ? data : []);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleRevokePolicy(policyId) {
+    try {
+      await api.deleteApprovalPolicy(policyId);
+      await loadPolicies();
+      if (onRefresh) await onRefresh();
+    } catch {
+      // ignore
+    }
+  }
 
   const pendingTickets = useMemo(
     () => tickets.filter((t) => t.status === "PENDING"),
@@ -69,18 +96,35 @@ export default function HITLGates({
     setExpandedIds(next);
   }
 
-  async function executeConfirmedDecision() {
+  async function executeConfirmedDecision(policyMode = null, patternVal = null) {
     if (!confirmState) return;
     const { ticket, decision } = confirmState;
     setBusyId(ticket.id);
+    const chosenPolicy =
+      typeof policyMode === "string"
+        ? policyMode
+        : selectedPolicyMode !== "once"
+        ? selectedPolicyMode
+        : null;
+    const chosenPattern =
+      typeof patternVal === "string"
+        ? patternVal
+        : chosenPolicy === "pattern" || chosenPolicy === "command_pattern"
+        ? customPattern
+        : null;
     try {
       await api.decideHitlTicket(
         ticket.id,
         decision,
         commentByTicket[ticket.id] ||
-          `Operator ${decision.toLowerCase()} via mobile-ready HITL drawer`
+          `Operator ${decision.toLowerCase()} via mobile-ready HITL drawer`,
+        chosenPolicy,
+        chosenPattern
       );
       setConfirmState(null);
+      setSelectedPolicyMode("once");
+      setCustomPattern("");
+      await loadPolicies();
       if (onRefresh) await onRefresh();
     } finally {
       setBusyId(null);
@@ -128,15 +172,109 @@ export default function HITLGates({
             Audit-safe gatekeeper: review pending actions and inspect execution receipts
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handleSimulateGatedToolCall}
-          disabled={simulating}
-          className="min-h-[44px] min-w-[44px] px-3.5 py-2 bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-300 text-xs font-semibold rounded-lg transition"
-        >
-          {simulating ? "Queueing..." : "+ Queue Test HITL Gate"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            data-testid="hitl-toggle-policies"
+            onClick={() => setShowPolicies((prev) => !prev)}
+            className={`min-h-[44px] min-w-[44px] px-3.5 py-2 border rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
+              showPolicies
+                ? "bg-indigo-600/30 border-indigo-500 text-indigo-300"
+                : "bg-slate-950 hover:bg-slate-800 border-slate-700 text-slate-300"
+            }`}
+          >
+            <span>🛡️</span>
+            <span>Trusted Policies</span>
+            <span className="px-1.5 py-0.2 rounded-full bg-slate-900 text-[10px] text-indigo-300 border border-indigo-500/30">
+              {policies.length}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={handleSimulateGatedToolCall}
+            disabled={simulating}
+            className="min-h-[44px] min-w-[44px] px-3.5 py-2 bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-300 text-xs font-semibold rounded-lg transition"
+          >
+            {simulating ? "Queueing..." : "+ Queue Test HITL Gate"}
+          </button>
+        </div>
       </div>
+
+      {/* Active Auto-Approval Policies Drawer (Invariant 16) */}
+      {showPolicies && (
+        <div
+          data-testid="hitl-policies-drawer"
+          className="bg-slate-950/90 border border-indigo-500/40 rounded-xl p-4 space-y-3 shadow-lg"
+        >
+          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <span>🛡️</span>
+                <span>Active Trust & Auto-Approval Policies</span>
+              </h3>
+              <p className="text-[11px] text-slate-400">
+                Invocations matching these policies execute immediately without manual approval
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowPolicies(false)}
+              className="text-xs text-slate-400 hover:text-slate-200 px-2 py-1"
+            >
+              ✕ Close
+            </button>
+          </div>
+
+          {policies.length === 0 ? (
+            <div className="text-center py-4 text-xs text-slate-500">
+              No active auto-approval policies. Use "Approve & Always Allow" when approving a ticket to graduate trust.
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              {policies.map((pol) => (
+                <div
+                  key={pol.id}
+                  data-testid={`hitl-policy-row-${pol.id}`}
+                  className="flex items-center justify-between gap-3 p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-xs"
+                >
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                        pol.policy_type === "tool"
+                          ? "bg-purple-950 text-purple-300 border border-purple-800"
+                          : pol.policy_type === "command_pattern"
+                          ? "bg-emerald-950 text-emerald-300 border border-emerald-800"
+                          : "bg-blue-950 text-blue-300 border border-blue-800"
+                      }`}>
+                        {pol.policy_type.replace("_", " ")}
+                      </span>
+                      <span className="font-mono font-bold text-slate-200 truncate">
+                        {pol.tool_id || pol.node_id || pol.workflow_id}
+                      </span>
+                      {pol.pattern && (
+                        <span className="font-mono text-emerald-400 bg-black/60 px-1.5 py-0.5 rounded border border-slate-800">
+                          {pol.pattern}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      Created by {pol.created_by} • {new Date(pol.created_at).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid={`hitl-revoke-policy-${pol.id}`}
+                    onClick={() => handleRevokePolicy(pol.id)}
+                    className="min-h-[44px] min-w-[44px] px-3 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 text-xs font-semibold transition"
+                  >
+                    Revoke
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Metric Triaging Banner (Action Required vs Resolved) */}
       <div className="grid grid-cols-3 gap-2 sm:gap-3">
@@ -558,6 +696,103 @@ export default function HITLGates({
                 $ {confirmState.ticket.tool_arguments.command}
               </div>
             )}
+
+            {/* Trust Graduation Options (Invariant 16) */}
+            {confirmState.decision === "APPROVED" && (
+              <div className="space-y-2 pt-1 border-t border-slate-800">
+                <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider block">
+                  Trust & Policy Graduation:
+                </label>
+                <div className="grid grid-cols-1 gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="hitl-policy-mode-once"
+                    onClick={() => setSelectedPolicyMode("once")}
+                    className={`min-h-[44px] px-3 py-2 rounded-lg text-xs font-semibold text-left transition border ${
+                      selectedPolicyMode === "once"
+                        ? "bg-slate-800 border-indigo-500 text-white"
+                        : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <div className="font-bold">Approve Once</div>
+                    <div className="text-[10px] text-slate-500 font-normal">Single execution; future calls will require approval.</div>
+                  </button>
+
+                  {confirmState.ticket.tool_id && (
+                    <button
+                      type="button"
+                      data-testid="hitl-policy-mode-tool"
+                      onClick={() => setSelectedPolicyMode("tool")}
+                      className={`min-h-[44px] px-3 py-2 rounded-lg text-xs font-semibold text-left transition border ${
+                        selectedPolicyMode === "tool"
+                          ? "bg-indigo-950/60 border-indigo-500 text-indigo-300"
+                          : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <div className="font-bold">🛡️ Approve & Always Allow Tool</div>
+                      <div className="text-[10px] text-slate-500 font-normal">
+                        Permanently trust tool <code>{confirmState.ticket.tool_id}</code> for future runs.
+                      </div>
+                    </button>
+                  )}
+
+                  {confirmState.ticket.tool_id === "bash_executor" && (
+                    <div className="space-y-1.5">
+                      <button
+                        type="button"
+                        data-testid="hitl-policy-mode-pattern"
+                        onClick={() => {
+                          setSelectedPolicyMode("pattern");
+                          if (!customPattern) {
+                            const cmd = confirmState.ticket.tool_arguments?.command || "";
+                            const first = cmd.trim().split(" ")[0] || "git";
+                            setCustomPattern(`${first} *`);
+                          }
+                        }}
+                        className={`min-h-[44px] w-full px-3 py-2 rounded-lg text-xs font-semibold text-left transition border ${
+                          selectedPolicyMode === "pattern"
+                            ? "bg-emerald-950/60 border-emerald-500 text-emerald-300"
+                            : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        <div className="font-bold">⚡ Approve & Always Allow Pattern</div>
+                        <div className="text-[10px] text-slate-500 font-normal">
+                          Auto-approve matching command prefix or glob (e.g. <code>git *</code>).
+                        </div>
+                      </button>
+                      {selectedPolicyMode === "pattern" && (
+                        <input
+                          type="text"
+                          data-testid="hitl-pattern-input"
+                          value={customPattern}
+                          onChange={(e) => setCustomPattern(e.target.value)}
+                          placeholder="e.g. git * or pytest*"
+                          className="w-full bg-black/60 border border-emerald-500/50 rounded-lg px-3 py-1.5 text-xs font-mono text-emerald-300"
+                        />
+                      )}
+                    </div>
+                  )}
+
+                  {confirmState.ticket.gate_type === "user_task" && (
+                    <button
+                      type="button"
+                      data-testid="hitl-policy-mode-workflow-node"
+                      onClick={() => setSelectedPolicyMode("workflow_node")}
+                      className={`min-h-[44px] px-3 py-2 rounded-lg text-xs font-semibold text-left transition border ${
+                        selectedPolicyMode === "workflow_node"
+                          ? "bg-blue-950/60 border-blue-500 text-blue-300"
+                          : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <div className="font-bold">🔄 Approve & Automate Step</div>
+                      <div className="text-[10px] text-slate-500 font-normal">
+                        Switch this workflow step to auto-advance in all future runs.
+                      </div>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="flex gap-2.5 pt-2">
               <button
                 type="button"
@@ -569,7 +804,7 @@ export default function HITLGates({
               <button
                 type="button"
                 data-testid="hitl-confirm-submit-btn"
-                onClick={executeConfirmedDecision}
+                onClick={() => executeConfirmedDecision()}
                 className={`min-h-[44px] min-w-[44px] flex-1 rounded-lg text-xs font-bold text-white ${
                   confirmState.decision === "APPROVED"
                     ? "bg-emerald-600 hover:bg-emerald-500"

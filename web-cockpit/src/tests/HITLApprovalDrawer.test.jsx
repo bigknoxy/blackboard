@@ -1,12 +1,23 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import HITLGates from "../components/HITLGates";
 
 vi.mock("../api", () => ({
   api: {
     decideHitlTicket: vi.fn().mockResolvedValue({ status: "APPROVED" }),
     invokeTool: vi.fn().mockResolvedValue({ status: "AWAITING_APPROVAL" }),
+    listApprovalPolicies: vi.fn().mockResolvedValue([
+      {
+        id: "pol-1",
+        policy_type: "tool",
+        tool_id: "git_branch_commit",
+        enabled: true,
+        created_by: "operator",
+        created_at: new Date().toISOString(),
+      },
+    ]),
+    deleteApprovalPolicy: vi.fn().mockResolvedValue({ status: "deleted" }),
   },
 }));
 
@@ -129,5 +140,51 @@ describe("HITLApprovalDrawer - Thumb-Accessible Drawer, Triaging & Minimized Res
     fireEvent.click(bulkToggle);
 
     expect(screen.getByTestId("hitl-bash-preview-ticket-bash-1")).toBeDefined();
+  });
+
+  it("supports trust graduation options ('Approve & Always Allow Tool') and active policies drawer", async () => {
+    const { api } = await import("../api");
+    render(
+      <HITLGates
+        tickets={sampleTickets}
+        selectedWorkflowId="code_review_pipeline"
+      />
+    );
+
+    // 1. Toggle Policies drawer
+    const togglePoliciesBtn = screen.getByTestId("hitl-toggle-policies");
+    expect(togglePoliciesBtn).toBeDefined();
+    fireEvent.click(togglePoliciesBtn);
+
+    const policiesDrawer = screen.getByTestId("hitl-policies-drawer");
+    expect(policiesDrawer).toBeDefined();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("hitl-policies-drawer").textContent).toContain("git_branch_commit");
+    });
+
+    // Revoke policy
+    const revokeBtn = screen.getByTestId("hitl-revoke-policy-pol-1");
+    expect(revokeBtn).toBeDefined();
+    fireEvent.click(revokeBtn);
+    expect(api.deleteApprovalPolicy).toHaveBeenCalledWith("pol-1");
+
+    // 2. Test Trust Graduation in Approval Confirmation Modal
+    const approveBtn = screen.getByTestId("hitl-approve-btn-ticket-hitl-99");
+    fireEvent.click(approveBtn);
+
+    const alwaysAllowBtn = screen.getByTestId("hitl-policy-mode-tool");
+    expect(alwaysAllowBtn).toBeDefined();
+    fireEvent.click(alwaysAllowBtn);
+
+    const confirmSubmit = screen.getByTestId("hitl-confirm-submit-btn");
+    fireEvent.click(confirmSubmit);
+    expect(api.decideHitlTicket).toHaveBeenCalledWith(
+      "ticket-hitl-99",
+      "APPROVED",
+      expect.any(String),
+      "tool",
+      null
+    );
   });
 });
