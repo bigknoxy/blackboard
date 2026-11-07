@@ -69,6 +69,9 @@ async def init_db() -> None:
             async with engine.begin() as conn:
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
                 await conn.run_sync(Base.metadata.create_all)
+                await conn.execute(
+                    text("ALTER TABLE hitl_tickets ADD COLUMN IF NOT EXISTS execution_result JSONB")
+                )
             return
         except Exception:
             if attempt == 89:

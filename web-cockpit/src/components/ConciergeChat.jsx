@@ -270,6 +270,16 @@ export default function ConciergeChat({
                               Query: "{tc.query}"
                             </div>
                           )}
+                          {tc.content && (
+                            <div className="text-[11px] text-emerald-300 font-mono truncate">
+                              Memory: "{tc.content}"
+                            </div>
+                          )}
+                          {tc.agents && (
+                            <div className="text-[10px] text-slate-300 font-mono truncate">
+                              {tc.count || 0} memories across: {Array.isArray(tc.agents) ? tc.agents.join(", ") : tc.agents}
+                            </div>
+                          )}
                           {tc.command && (
                             <div className="text-[11px] text-amber-300 font-mono truncate">
                               Cmd: {tc.command}
@@ -322,6 +332,13 @@ export default function ConciergeChat({
 
         {/* Quick prompt suggestions (one-touch shortcuts for mobile) */}
         <div className="flex items-center gap-1.5 overflow-x-auto py-1.5 no-scrollbar border-t border-slate-800/60">
+          <button
+            type="button"
+            onClick={() => setInput("Do you have memory? What are your stored memories across agents?")}
+            className="shrink-0 px-2.5 py-1 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition"
+          >
+            🧠 Memory & Context
+          </button>
           <button
             type="button"
             onClick={() => setInput("Can you search the Web? Tell me what today's date is and if there are any NFL games today")}
