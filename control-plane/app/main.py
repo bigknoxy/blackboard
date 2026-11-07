@@ -244,6 +244,28 @@ async def seed_initial_state() -> None:
                 ],
                 "subscribed_events": ["code.published", "test_result.published"],
             },
+            {
+                "id": "concierge-admin",
+                "name": "Concierge Admin Agent",
+                "role": "Platform Operator & Meta-Tool Orchestrator",
+                "system_prompt": (
+                    "You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane. "
+                    "Manage operator steering, memory persistence, platform telemetry, and workflow orchestration."
+                ),
+                "inference_config": {
+                    "provider": "openai",
+                    "model_name": "qwen3-4b",
+                    "base_url": "http://192.168.1.180:8081/v1",
+                    "api_key": None,
+                    "temperature": 0.2,
+                },
+                "allowed_tools": [
+                    "web_search",
+                    "bash_executor",
+                    "repo_search",
+                ],
+                "subscribed_events": ["blackboard.entry_created"],
+            },
         ]
 
         for agent_data in default_agents:
@@ -1312,6 +1334,9 @@ async def decide_hitl_ticket(
                 ),
             )
             tool_result = invoke_res.result
+            ticket.execution_result = tool_result
+            await session.commit()
+            await session.refresh(ticket)
 
             # Record approved tool output on the Blackboard
             bb_entry = BlackboardEntryModel(

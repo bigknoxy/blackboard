@@ -3,8 +3,8 @@ import json
 import logging
 import math
 import os
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -133,6 +133,18 @@ class ConciergeAdminAgent:
             "name": "suggest_tools",
             "description": "Proactively recommend and catalog tools needed for operator requests.",
         },
+        {
+            "name": "store_memory",
+            "description": "Persist a new episodic, semantic, or operator preference memory with pgvector 768-dim embeddings.",
+        },
+        {
+            "name": "list_memories",
+            "description": "Inspect and summarize active vector memories across all agents or a specific agent.",
+        },
+        {
+            "name": "search_memories",
+            "description": "Execute semantic vector similarity search against stored agent memories.",
+        },
     ]
 
     async def handle_chat(
@@ -141,6 +153,19 @@ class ConciergeAdminAgent:
         msg = req.message.strip()
         lowered = msg.lower()
         tool_calls_executed: List[Dict[str, Any]] = []
+
+        # Ensure concierge-admin exists in DB for foreign key relations
+        c_agent = await session.get(AgentModel, "concierge-admin")
+        if not c_agent:
+            c_agent = AgentModel(
+                id="concierge-admin",
+                name="Concierge Admin Agent",
+                role="Platform Operator & Meta-Tool Orchestrator",
+                system_prompt="You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane.",
+                allowed_tools=["web_search", "bash_executor", "repo_search"],
+            )
+            session.add(c_agent)
+            await session.commit()
 
         # 1. Execute administrative meta-tools triggered by intent or explicit command
         if any(
@@ -437,12 +462,124 @@ class ConciergeAdminAgent:
                 ),
             )
             if search_resp.status == "EXECUTED":
+                results_list = (search_resp.result or {}).get("results", [])
                 tool_calls_executed.append({
                     "tool": "web_search",
                     "query": clean_query[:100],
                     "status": "EXECUTED",
-                    "results": (search_resp.result or {}).get("results", []),
+                    "results": results_list,
                 })
+
+                # Autonomous Crystallization: persist top web research into researcher agent's long-term memory
+                if results_list:
+                    top_res = results_list[0]
+                    crystal_content = f"Web Research ({clean_query[:50]}): {top_res.get('title')} — {top_res.get('snippet')}"
+                    r_agent = await session.get(AgentModel, "researcher")
+                    if not r_agent:
+                        r_agent = AgentModel(
+                            id="researcher",
+                            name="Principal Technical Researcher",
+                            role="Technical Researcher & Documentation Scout",
+                            system_prompt="You are the Principal Technical Researcher.",
+                            allowed_tools=["web_search", "repo_search"],
+                        )
+                        session.add(r_agent)
+                        await session.commit()
+                    emb = await compute_embedding(crystal_content)
+                    c_mem = AgentMemoryModel(
+                        agent_id="researcher",
+                        memory_type="semantic",
+                        content=crystal_content,
+                        embedding=emb,
+                    )
+                    session.add(c_mem)
+                    await session.commit()
+                    tool_calls_executed.append({
+                        "tool": "store_memory",
+                        "agent_id": "researcher",
+                        "content": crystal_content[:100],
+                        "status": "CRYSTALLIZED",
+                    })
+
+        # Store Memory & Operator Preference Intent
+        is_remember_intent = any(
+            k in lowered for k in [
+                "remember", "save to memory", "store in memory", "keep in mind", "note that"
+            ]
+        )
+        if is_remember_intent:
+            fact_text = msg
+            for prefix in [
+                "do you have memory? i'd like you to remember that",
+                "do you have memory? i'd like you to remember",
+                "i'd like you to remember that", "i'd like you to remember",
+                "please remember that", "please remember", "remember that", "remember",
+                "save to memory:", "save to memory", "store in memory:", "store in memory",
+                "keep in mind that", "keep in mind", "note that:", "note that"
+            ]:
+                if prefix in fact_text.lower():
+                    idx = fact_text.lower().find(prefix) + len(prefix)
+                    fact_text = fact_text[idx:].strip(" :,.-")
+                    break
+            if not fact_text or len(fact_text) < 4:
+                fact_text = msg
+
+            emb = await compute_embedding(fact_text)
+            new_mem = AgentMemoryModel(
+                agent_id="concierge-admin",
+                memory_type="semantic",
+                content=fact_text,
+                embedding=emb,
+            )
+            session.add(new_mem)
+            await session.commit()
+            await session.refresh(new_mem)
+
+            r = get_redis()
+            if any(k in lowered for k in ["cst", "central"]):
+                await r.set("operator:timezone", "CST")
+            elif any(k in lowered for k in ["est", "eastern"]):
+                await r.set("operator:timezone", "EST")
+            elif any(k in lowered for k in ["pst", "pacific"]):
+                await r.set("operator:timezone", "PST")
+            elif any(k in lowered for k in ["mst", "mountain"]):
+                await r.set("operator:timezone", "MST")
+
+            if any(k in lowered for k in ["in ks", "kansas"]):
+                await r.set("operator:location", "KS")
+
+            tool_calls_executed.append({
+                "tool": "store_memory",
+                "agent_id": "concierge-admin",
+                "memory_id": str(new_mem.id),
+                "content": fact_text,
+                "memory_type": "semantic",
+                "status": "STORED",
+            })
+
+        # List & Inspect Stored Memories Intent
+        if any(
+            k in lowered for k in [
+                "what do your other memories include", "what memories", "list memories",
+                "show memories", "search memory", "what is in memory", "what do you remember",
+                "other memories", "inspect memories", "view memories"
+            ]
+        ) and not is_remember_intent:
+            all_mems_res = await session.execute(
+                select(AgentMemoryModel).order_by(AgentMemoryModel.created_at.desc()).limit(25)
+            )
+            all_mems = all_mems_res.scalars().all()
+            breakdown: Dict[str, List[str]] = {}
+            for m in all_mems:
+                breakdown.setdefault(m.agent_id, []).append(m.content[:140])
+
+            tool_calls_executed.append({
+                "tool": "list_memories",
+                "count": len(all_mems),
+                "agents": list(breakdown.keys()),
+                "status": "RETRIEVED",
+                "breakdown": breakdown,
+            })
 
         # Direct Bash Execution intent
         if any(lowered.startswith(p) for p in ["bash:", "run bash:", "run command:", "exec:"]):
@@ -577,6 +714,10 @@ class ConciergeAdminAgent:
         )
         total_memories = mem_count_res.scalar() or 0
 
+        r = get_redis()
+        op_tz = await r.get("operator:timezone")
+        op_loc = await r.get("operator:location")
+
         return {
             "agents": agents,
             "tools": tools,
@@ -584,7 +725,32 @@ class ConciergeAdminAgent:
             "pending_hitl": pending_hitl,
             "recent_blackboard_entries": recent_entries,
             "total_memories": total_memories,
+            "operator_timezone": op_tz,
+            "operator_location": op_loc,
         }
+
+    @staticmethod
+    def _compute_grounding_strings(snapshot: Dict[str, Any]) -> Tuple[str, str]:
+        now_utc = datetime.now(timezone.utc)
+        op_tz = snapshot.get("operator_timezone")
+        op_loc = snapshot.get("operator_location")
+
+        if op_tz and str(op_tz).upper() in ("CST", "CENTRAL"):
+            local_dt = now_utc - timedelta(hours=6)
+            date_str = f"{local_dt.strftime('%A, %B %d, %Y %I:%M %p')} CST ({now_utc.strftime('%H:%M UTC')})"
+            context = f"Operator is in {op_loc or 'KS'} (CST). Local time: {local_dt.strftime('%I:%M %p CST')}."
+        elif op_tz and str(op_tz).upper() in ("EST", "EASTERN"):
+            local_dt = now_utc - timedelta(hours=5)
+            date_str = f"{local_dt.strftime('%A, %B %d, %Y %I:%M %p')} EST ({now_utc.strftime('%H:%M UTC')})"
+            context = f"Operator is in {op_loc or 'US'} (EST). Local time: {local_dt.strftime('%I:%M %p EST')}."
+        elif op_tz and str(op_tz).upper() in ("PST", "PACIFIC"):
+            local_dt = now_utc - timedelta(hours=8)
+            date_str = f"{local_dt.strftime('%A, %B %d, %Y %I:%M %p')} PST ({now_utc.strftime('%H:%M UTC')})"
+            context = f"Operator is in {op_loc or 'US'} (PST). Local time: {local_dt.strftime('%I:%M %p PST')}."
+        else:
+            date_str = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
+            context = "Operator timezone not explicitly configured (UTC default)."
+        return date_str, context
 
     async def _try_ollama_chat(
         self,
@@ -592,20 +758,25 @@ class ConciergeAdminAgent:
         snapshot: Dict[str, Any],
         executed_tools: List[Dict[str, Any]],
     ) -> Optional[str]:
-        now_utc = datetime.now(timezone.utc)
-        current_date_str = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
+        current_date_str, tz_context = self._compute_grounding_strings(snapshot)
         system_prompt = (
             f"You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane.\n"
             f"Current temporal grounding: {current_date_str}.\n"
-            f"You have live access to platform state and executed MCP tools including web_search and bash_executor. "
+            f"{tz_context}\n"
+            f"You have live access to platform state, stored pgvector memories, and executed MCP tools (web_search, bash_executor, store_memory, list_memories). "
+            f"If store_memory was executed, confirm to the operator what was stored in pgvector. "
+            f"If list_memories was executed, detail the stored memories per agent using the executed tool results. "
+            f"Never claim you cannot access or read memories if list_memories was executed. "
             f"If web_search was executed, integrate the live search results and answer the operator accurately and concisely. "
-            f"Never claim you cannot search the web or lack current date/time information."
+            f"Always answer the operator accurately and concisely."
         )
         compact_summary = {
             "agents": [a["id"] for a in snapshot.get("agents", [])],
             "workflows": [w["id"] for w in snapshot.get("workflows", [])],
             "pending_hitl_count": len(snapshot.get("pending_hitl", [])),
             "total_memories": snapshot.get("total_memories", 0),
+            "operator_timezone": snapshot.get("operator_timezone"),
+            "operator_location": snapshot.get("operator_location"),
         }
         messages_payload = [
             {"role": "system", "content": system_prompt},
@@ -687,9 +858,7 @@ class ConciergeAdminAgent:
         snapshot: Dict[str, Any],
         executed_tools: List[Dict[str, Any]],
     ) -> str:
-        now_utc = datetime.now(timezone.utc)
-        date_str = now_utc.strftime("%A, %B %d, %Y")
-        time_str = now_utc.strftime("%H:%M UTC")
+        date_str, tz_note = self._compute_grounding_strings(snapshot)
 
         agent_list = ", ".join(
             f"`{a['id']}` ({a['role']})" for a in snapshot["agents"]
@@ -700,13 +869,32 @@ class ConciergeAdminAgent:
         )
         lines = [
             f"**Concierge Admin Report** (Meta-tools invoked: {tool_names})",
-            f"- **System Date & Grounding:** {date_str} ({time_str})",
+            f"- **System Date & Grounding:** {date_str}",
             f"- **Active Agents ({len(snapshot['agents'])}):** {agent_list or 'None'}",
             f"- **Registered MCP Tools:** {len(snapshot['tools'])} (RBAC enforced + HITL gates active)",
             f"- **Workflows ({len(snapshot['workflows'])}):** {wf_list or 'None'}",
             f"- **Vector Memories Stored (`pgvector`):** {snapshot['total_memories']}",
             f"- **Pending HITL Approval Tickets:** {len(snapshot['pending_hitl'])}",
         ]
+        if any(t["tool"] == "store_memory" for t in executed_tools):
+            sms = [t for t in executed_tools if t["tool"] == "store_memory"]
+            for sm in sms:
+                status_label = sm.get("status", "STORED")
+                if status_label == "CRYSTALLIZED":
+                    lines.append(
+                        f"- **Research Auto-Crystallized in pgvector:** Stored into `@{sm.get('agent_id', 'researcher')}` memory: \"{sm.get('content', '')}\""
+                    )
+                else:
+                    lines.append(
+                        f"- **Memory Stored in pgvector:** Stored into `@{sm.get('agent_id', 'concierge-admin')}` memory: \"{sm.get('content', '')}\" (Status: {status_label})"
+                    )
+        if any(t["tool"] == "list_memories" for t in executed_tools):
+            lm = next(t for t in executed_tools if t["tool"] == "list_memories")
+            breakdown = lm.get("breakdown", {})
+            lines.append(f"\n### 🧠 Platform Vector Memories Overview ({lm.get('count', 0)} total across {len(lm.get('agents', []))} agents):")
+            for ag, mem_snippets in breakdown.items():
+                snippets_text = " | ".join(f'"{s}"' for s in mem_snippets[:2])
+                lines.append(f"- **`@{ag}`** ({len(mem_snippets)} memories): {snippets_text}")
         if any(t["tool"] == "web_search" for t in executed_tools):
             ws = next(t for t in executed_tools if t["tool"] == "web_search")
             lines.append(f"\n### 🌐 Live Web Search Results (`{ws.get('query')}`):")

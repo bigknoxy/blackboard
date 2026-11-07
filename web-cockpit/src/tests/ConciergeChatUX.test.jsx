@@ -35,6 +35,9 @@ describe("ConciergeChat - Mobile Input Ergonomics & Thinking Indicator", () => {
     expect(textarea.className).toContain("flex-1");
 
     // Check quick prompt buttons
+    const memoryBtn = screen.getByText(/Memory & Context/i);
+    expect(memoryBtn).toBeDefined();
+
     const steerBtn = screen.getByText(/Steer: Strict Typing/i);
     expect(steerBtn).toBeDefined();
 
@@ -44,6 +47,9 @@ describe("ConciergeChat - Mobile Input Ergonomics & Thinking Indicator", () => {
     const bashBtn = screen.getByText(/Bash & Tools Suggestion/i);
     expect(bashBtn).toBeDefined();
 
+    fireEvent.click(memoryBtn);
+    expect(textarea.value).toContain("Do you have memory?");
+
     fireEvent.click(webSearchBtn);
     expect(textarea.value).toContain("Tell me what today's date is and if there are any NFL games today");
 
@@ -51,11 +57,22 @@ describe("ConciergeChat - Mobile Input Ergonomics & Thinking Indicator", () => {
     expect(textarea.value).toBe("steer: prioritize strict typing and robust tests");
   });
 
-  it("renders visual action receipt cards for web_search, bash_executor and tool suggestions", async () => {
+  it("renders visual action receipt cards for web_search, bash_executor, store_memory, list_memories and tool suggestions", async () => {
     const { api } = await import("../api");
     api.chatConcierge.mockResolvedValueOnce({
       reply: "Executed web search and provisioned bash tool.",
       tool_calls_executed: [
+        {
+          tool: "store_memory",
+          content: "Operator is located in KS with timezone CST.",
+          status: "STORED",
+        },
+        {
+          tool: "list_memories",
+          count: 5,
+          agents: ["architect", "coder", "concierge-admin"],
+          status: "RETRIEVED",
+        },
         {
           tool: "web_search",
           query: "NFL games today",
@@ -86,6 +103,10 @@ describe("ConciergeChat - Mobile Input Ergonomics & Thinking Indicator", () => {
     expect(screen.getByText(/Executed web search and provisioned bash tool/i)).toBeDefined();
     const receiptsContainer = screen.getByTestId("concierge-action-receipts");
     expect(receiptsContainer).toBeDefined();
+    expect(receiptsContainer.textContent).toContain("store_memory");
+    expect(receiptsContainer.textContent).toContain("list_memories");
+    expect(receiptsContainer.textContent).toContain('Memory: "Operator is located in KS with timezone CST."');
+    expect(receiptsContainer.textContent).toContain("5 memories across: architect, coder, concierge-admin");
     expect(receiptsContainer.textContent).toContain("web_search");
     expect(receiptsContainer.textContent).toContain("bash_executor");
     expect(receiptsContainer.textContent).toContain("suggest_tools");
