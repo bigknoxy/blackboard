@@ -155,9 +155,18 @@ async def test_falsifier_16_command_pattern_auto_approval(db_session):
 
         # Ensure coder has bash_executor
         coder = await db_session.get(AgentModel, "coder")
-        if "bash_executor" not in (coder.allowed_tools or []):
+        if not coder:
+            coder = AgentModel(
+                id="coder",
+                name="Coder Agent",
+                role="Implementation Specialist",
+                system_prompt="Implement code",
+                allowed_tools=["bash_executor"],
+            )
+            db_session.add(coder)
+        elif "bash_executor" not in (coder.allowed_tools or []):
             coder.allowed_tools = list(coder.allowed_tools or []) + ["bash_executor"]
-            await db_session.commit()
+        await db_session.commit()
 
         # Step 1: Create pattern policy for "echo *"
         policy_res = await client.post(
@@ -296,6 +305,17 @@ async def test_falsifier_16_concierge_dynamic_tool_synthesis_and_policy(db_sessi
                 MCPToolModel.id == "disk_free_inspector"
             )
         )
+        # Ensure architect agent exists (seeds if fresh CI environment)
+        arch = await db_session.get(AgentModel, "architect")
+        if not arch:
+            arch = AgentModel(
+                id="architect",
+                name="Architect Agent",
+                role="System Architect",
+                system_prompt="Design architectures",
+                allowed_tools=["ast_complexity_analyzer"],
+            )
+            db_session.add(arch)
         await db_session.commit()
 
         # Step 1: Operator asks Concierge to create a dynamic tool
