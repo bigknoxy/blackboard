@@ -45,6 +45,7 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 │       ├── mcp_gateway.py           # MCP multiplexer, RBAC enforcement, tool chain pathfinder & HITL router
 │       ├── workflow_engine.py       # YAML <-> BPMN 2.0 converter, state machine, pruning & zombie recovery
 │       ├── concierge.py             # Concierge Admin Agent (/api/v1/chat) & embedding helper
+│       ├── channel_gateway.py       # Unified SOLID channel gateway (Telegram bot, Discord, HITL inline buttons)
 │       └── optimizer.py             # Autonomous Optimizer (BAO), telemetry, shadow sandbox & rollback guard
 ├── agent-worker/
 │   ├── Dockerfile
@@ -60,7 +61,10 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 │   └── src/
 │       ├── App.jsx                  # Responsive shell (Desktop 3-col split / Mobile bottom nav)
 │       ├── api.js                   # Dynamic LAN-aware REST & WebSocket client
+│       ├── constants/
+│       │   └── navigation.js        # Centralized navigation registry & tab definitions
 │       ├── components/
+│       │   ├── CockpitHome.jsx      # Conversational Cockpit Home (Concierge front door + ambient stats + feed)
 │       │   ├── BlackboardFeed.jsx   # Collapsible cards, line-clamp preview, DAG toggle, >=44px targets
 │       │   ├── BlackboardGraphCanvas.jsx # Interactive DAG lineage canvas, active path highlight, tool chain resolver
 │       │   ├── AgentManager.jsx     # Persona roster, live model routing, tool RBAC checklist & prompt editor
@@ -75,7 +79,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 │           ├── AgentManager.test.jsx
 │           ├── ToolsRegistry.test.jsx
 │           ├── MobileNavigation.test.jsx
-│           └── HITLApprovalDrawer.test.jsx
+│           ├── HITLApprovalDrawer.test.jsx
+│           └── CockpitHome.test.jsx
 └── tests/
     ├── conftest.py                  # InMemoryAsyncRedis emulator & test fixtures
     ├── unit/
@@ -98,7 +103,8 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
         ├── test_autonomous_optimizer_and_rollback.py
         ├── test_concierge_temporal_web_and_bash.py
         ├── test_concierge_meta_memory_and_operator_grounding.py
-        └── test_dynamic_approval_policies_and_meta_tooling.py
+        ├── test_dynamic_approval_policies_and_meta_tooling.py
+        └── test_interactive_telegram_and_channel_gateway.py
 ```
 
 ---
@@ -121,6 +127,7 @@ This repository implements a **Config-Driven Multi-Agent Blackboard System** wit
 14. **Temporal Grounding, Autonomous Web Search Execution & HITL-Gated Bash Executor (Falsifier 14):** System prompts for the Concierge Admin Agent MUST dynamically inject the live UTC date and time. External intelligence or current events queries MUST autonomously trigger `web_search` via MCP Gateway and output structured `tool_calls_executed` action receipts. The MCP catalog MUST include `bash_executor` (`consumes_type="shell_command"`, `produces_type="command_output"`, `requires_approval=True`) with HITL gating. Missing capability requests must trigger proactive tool suggestions and auto-provisioning rather than denial of service.
 15. **Concierge Meta-Memory Persistence, Operator Grounding & Approvals Triage (Falsifier 15):** When operator instructs memory storage ("remember X"), Concierge MUST persist the memory into PostgreSQL `agent_memories` with 768-dim vector embeddings and output `store_memory` in `tool_calls_executed`. Hallucinating memory storage without executed DB writes is strictly forbidden. Operator timezone preferences (e.g. CST) MUST ground subsequent time queries in local time. Memory queries MUST execute `list_memories` and summarize actual memories across agents rather than disclaiming access. Web search findings MUST be crystallized into `agent_memories` for the `researcher` agent. The Approvals drawer (`HITLGates`) MUST provide metric triaging (Needs Review vs Approved/Rejected), render terminal styling for `bash_executor` commands, minimize resolved items by default with exit code badges, and persist/display `execution_result` upon approval.
 16. **Autonomous Approval Policies, Workflow Step Automation & Dynamic Tool Synthesis (Falsifier 16):** Operators must be able to graduate trust via persistent auto-approval policies (`approval_policies` table) to eliminate repetitive manual approvals. Policies support exact tool matching (`tool`), wildcards/globs on command lines (`command_pattern`), and BPMN workflow user tasks (`workflow_node`). When a policy matches, `MCPToolboxGateway.invoke_tool` and `WorkflowEngine._activate_node` MUST auto-approve the action without stalling in `PENDING_APPROVAL`. The Concierge Admin Agent serves as the primary conversational meta-tool orchestrator: it MUST dynamically create custom executable tools (`create_dynamic_tool`) and manage approval policies (`manage_approval_policy`) on demand, returning structured action receipts (`tool_calls_executed`).
+17. **Conversational Cockpit Home, Interactive Telegram Gateway & SOLID Channel Abstraction (Falsifier 17):** The Web Cockpit elevates Concierge Chat to the primary landing interface ("Conversational Cockpit Home") with ambient status chips, pending HITL alerts, and mobile-first navigation. All external chat interfaces (Telegram, Discord) are abstracted through a single, SOLID-compliant `ChannelGateway` (`channel_gateway.py`). Telegram integration MUST support inbound slash commands (`/status`, `/cockpit`, `/approvals`, `/steer`), conversational routing, and rich interactive HITL notifications with 1-tap inline buttons (`[Approve Once]`, `[Always Allow]`, `[Reject]`) that atomically resolve tickets in PostgreSQL, dispatch tool execution, graduate trust policies, and update message cards.
 
 
 ---

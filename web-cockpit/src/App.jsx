@@ -4,14 +4,20 @@ import BlackboardFeed from "./components/BlackboardFeed";
 import BpmnEditor from "./components/BpmnEditor";
 import HITLGates from "./components/HITLGates";
 import ConciergeChat from "./components/ConciergeChat";
+import CockpitHome from "./components/CockpitHome";
 import AgentManager from "./components/AgentManager";
 import ToolsRegistry from "./components/ToolsRegistry";
 import UserGuide from "./components/UserGuide";
 import BacklogModal from "./components/BacklogModal";
+import {
+  NAVIGATION_TABS,
+  MORE_DRAWER_ITEMS,
+  DESKTOP_MODES,
+} from "./constants/navigation";
 
 export default function App() {
-  const [mobilePanel, setMobilePanel] = useState("board"); // board | agents | approvals | concierge | workflows | tools | guide
-  const [desktopFocus, setDesktopFocus] = useState("split"); // split | board | workflows | agents | tools | approvals | concierge | guide
+  const [mobilePanel, setMobilePanel] = useState("concierge"); // Defaults to Conversational Cockpit Home
+  const [desktopFocus, setDesktopFocus] = useState("home"); // Defaults to Conversational Cockpit Home
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [workflows, setWorkflows] = useState([]);
@@ -31,10 +37,10 @@ export default function App() {
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
 
   const PANEL_ORDER = [
-    "board",
-    "agents",
-    "approvals",
     "concierge",
+    "board",
+    "approvals",
+    "agents",
     "workflows",
     "tools",
     "guide",
@@ -286,28 +292,26 @@ export default function App() {
 
             {/* Desktop layout mode switcher (lg+) */}
             <div className="hidden lg:flex items-center bg-slate-950 border border-slate-800 rounded-lg p-1 gap-1">
-              {[
-                { id: "split", label: "3-Column Split" },
-                { id: "board", label: "Focus Board" },
-                { id: "workflows", label: "Focus BPMN" },
-                { id: "agents", label: `Agents (${agents.length})` },
-                { id: "tools", label: `Tools (${tools.length})` },
-                { id: "approvals", label: `Approvals (${pendingHitlCount})` },
-                { id: "concierge", label: "Concierge" },
-                { id: "guide", label: "User Guide" },
-              ].map((mode) => (
-                <button
-                  key={mode.id}
-                  onClick={() => setDesktopFocus(mode.id)}
-                  className={`min-h-[36px] px-3 py-1 rounded text-xs font-semibold transition ${
-                    desktopFocus === mode.id
-                      ? "bg-indigo-600 text-white"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  {mode.label}
-                </button>
-              ))}
+              {DESKTOP_MODES.map((mode) => {
+                let dynamicLabel = mode.label;
+                if (mode.dynamicCount === "agents") dynamicLabel = `Agents (${agents.length})`;
+                if (mode.dynamicCount === "tools") dynamicLabel = `Tools (${tools.length})`;
+                if (mode.dynamicCount === "approvals") dynamicLabel = `Approvals (${pendingHitlCount})`;
+
+                return (
+                  <button
+                    key={mode.id}
+                    onClick={() => setDesktopFocus(mode.id)}
+                    className={`min-h-[36px] px-3 py-1 rounded text-xs font-semibold transition ${
+                      desktopFocus === mode.id
+                        ? "bg-indigo-600 text-white"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {dynamicLabel}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -393,6 +397,23 @@ export default function App() {
             </div>
           ) : (
             <div>
+              {desktopFocus === "home" && (
+                <CockpitHome
+                  selectedWorkflowId={selectedWorkflowId}
+                  currentWorkflow={currentWorkflow}
+                  agents={agents}
+                  tools={tools}
+                  blackboardEntries={blackboardEntries}
+                  hitlTickets={hitlTickets}
+                  liveEvents={liveEvents}
+                  wsConnected={wsConnected}
+                  onNavigate={(panel) => {
+                    setDesktopFocus(panel);
+                    setMobilePanel(panel);
+                  }}
+                  onRefresh={refreshAll}
+                />
+              )}
               {desktopFocus === "board" && (
                 <BlackboardFeed
                   entries={blackboardEntries}
@@ -487,11 +508,17 @@ export default function App() {
             />
           )}
           {mobilePanel === "concierge" && (
-            <ConciergeChat
+            <CockpitHome
               selectedWorkflowId={selectedWorkflowId}
+              currentWorkflow={currentWorkflow}
               agents={agents}
               tools={tools}
-              onStateMutated={refreshAll}
+              blackboardEntries={blackboardEntries}
+              hitlTickets={hitlTickets}
+              liveEvents={liveEvents}
+              wsConnected={wsConnected}
+              onNavigate={(panel) => setMobilePanel(panel)}
+              onRefresh={refreshAll}
             />
           )}
           {mobilePanel === "guide" && <UserGuide />}
@@ -504,6 +531,22 @@ export default function App() {
         aria-label="Mobile Primary Navigation"
         className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 grid grid-cols-5 gap-1.5"
       >
+        <button
+          data-testid="mobile-nav-concierge"
+          onClick={() => {
+            setMobilePanel("concierge");
+            setMobileMoreOpen(false);
+          }}
+          className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
+            mobilePanel === "concierge" && !mobileMoreOpen
+              ? "bg-indigo-600 text-white"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <span className="text-sm">💬</span>
+          <span>Concierge</span>
+        </button>
+
         <button
           data-testid="mobile-nav-board"
           onClick={() => {
@@ -518,22 +561,6 @@ export default function App() {
         >
           <span className="text-sm">📋</span>
           <span>Board</span>
-        </button>
-
-        <button
-          data-testid="mobile-nav-agents"
-          onClick={() => {
-            setMobilePanel("agents");
-            setMobileMoreOpen(false);
-          }}
-          className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "agents" && !mobileMoreOpen
-              ? "bg-indigo-600 text-white"
-              : "text-slate-400 hover:text-slate-200"
-          }`}
-        >
-          <span className="text-sm">🤖</span>
-          <span>Agents</span>
         </button>
 
         <button
@@ -563,19 +590,19 @@ export default function App() {
         </button>
 
         <button
-          data-testid="mobile-nav-concierge"
+          data-testid="mobile-nav-agents"
           onClick={() => {
-            setMobilePanel("concierge");
+            setMobilePanel("agents");
             setMobileMoreOpen(false);
           }}
           className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-xs font-semibold transition ${
-            mobilePanel === "concierge" && !mobileMoreOpen
+            mobilePanel === "agents" && !mobileMoreOpen
               ? "bg-indigo-600 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
-          <span className="text-sm">💬</span>
-          <span>Concierge</span>
+          <span className="text-sm">🤖</span>
+          <span>Agents</span>
         </button>
 
         <button
