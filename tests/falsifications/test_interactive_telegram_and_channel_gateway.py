@@ -297,3 +297,78 @@ async def test_falsifier_17_channel_gateway_abstraction_and_notification(db_sess
         btn_texts = [b["text"] for row in keyboard for b in row]
         assert any("Approve" in t for t in btn_texts)
         assert any("Reject" in t for t in btn_texts)
+
+
+@pytest.mark.asyncio
+async def test_falsifier_17_telegram_tool_gap_analysis_and_xml_sanitization(db_session):
+    """Falsifier 17.5: Concierge parses and strips raw <tool_call> XML tags and executes architect gap analysis."""
+    app.dependency_overrides[get_db] = lambda: db_session
+    redis = await get_redis()
+    await redis.set("channel:telegram:token", "mock-token-123")
+    await redis.set("channel:telegram:chat_id", "987654321")
+
+    # 1. Verify static sanitizer strips raw XML tags and extracts tool calls
+    from app.concierge import concierge_agent
+    raw_llm_text = (
+        'Here is the platform status:\n'
+        '<tool_call>bash_executor<arg_key>command</arg_key><arg_value>echo "Analyzing tool inventory"</arg_value></tool_call>\n'
+        'All tools evaluated.'
+    )
+    cleaned, extracted = concierge_agent._sanitize_and_extract_tool_calls(raw_llm_text)
+    assert "<tool_call>" not in cleaned
+    assert "</tool_call>" not in cleaned
+    assert "<arg_key>" not in cleaned
+    assert "echo \"Analyzing tool inventory\"" not in cleaned
+    assert len(extracted) == 1
+    assert extracted[0]["tool"] == "bash_executor"
+    assert extracted[0]["arguments"]["command"] == 'echo "Analyzing tool inventory"'
+
+    # 2. Test operator delegation request via Telegram
+    mock_client = create_mock_httpx_client()
+    with patch("app.channel_gateway.httpx.AsyncClient", return_value=mock_client):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            chat_payload = {
+                "update_id": 1005,
+                "message": {
+                    "message_id": 46,
+                    "from": {"id": 111, "username": "bigknoxy777"},
+                    "chat": {"id": 987654321, "type": "private"},
+                    "text": "Use the architect agent to figure out what tools we are missing based on current usage and best practices and what would benefit us the most",
+                },
+            }
+            res = await client.post("/api/v1/channels/telegram/webhook", json=chat_payload)
+            assert res.status_code == 200
+
+            mock_client.post.assert_called()
+            sent_calls = [
+                c[1]["json"]
+                for c in mock_client.post.call_args_list
+                if "sendMessage" in c[0][0]
+            ]
+            assert len(sent_calls) >= 1
+            sent_text = sent_calls[0].get("text", "")
+
+            # Ensure no XML tags leaked
+            assert "<tool_call>" not in sent_text
+            assert "</tool_call>" not in sent_text
+            assert "<arg_key>" not in sent_text
+            assert "<arg_value>" not in sent_text
+
+            # Ensure Architect recommendations are presented
+            assert "Architect" in sent_text or "Tool Gap" in sent_text
+            assert any(t in sent_text for t in ["code_linter_ast", "git_diff_inspector", "container_sandbox_runner"])
+
+    # 3. Verify entry was posted to Blackboard by architect
+    from app.models import BlackboardEntryModel
+    arch_entries = (
+        await db_session.execute(
+            select(BlackboardEntryModel).where(
+                BlackboardEntryModel.agent_id == "architect",
+                BlackboardEntryModel.entry_type == "architecture_decision",
+            )
+        )
+    ).scalars().all()
+    assert len(arch_entries) >= 1
+    assert "code_linter_ast" in arch_entries[0].content

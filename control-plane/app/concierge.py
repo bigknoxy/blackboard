@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
@@ -426,6 +427,114 @@ class ConciergeAdminAgent:
                     "recommendation": "Registered bash_executor (sandboxed execution with HITL approval gate) and web_search (external intelligence).",
                 })
 
+        # Architect Tool Gap Analysis Intent (Comprehensive Best-Practice Tooling Audit)
+        if (
+            any(
+                k in lowered for k in [
+                    "tools we are missing", "tools are missing", "missing tools",
+                    "what tools are we missing", "tool gap", "analyze tool inventory",
+                    "architect agent to figure out what tools", "architect to figure out what tools",
+                    "architect figure out what tools", "architect to analyze tools",
+                    "architect analyze tools", "what tools would benefit us"
+                ]
+            )
+            or ("architect" in lowered and "tools" in lowered and ("missing" in lowered or "gap" in lowered or "benefit" in lowered or "usage" in lowered))
+        ):
+            tools_res = await session.execute(select(MCPToolModel))
+            existing_tools = tools_res.scalars().all()
+            existing_tool_ids = {t.id for t in existing_tools}
+
+            recommended_catalog = [
+                {
+                    "id": "code_linter_ast",
+                    "name": "AST Code Linter & Type Checker",
+                    "priority": "HIGH",
+                    "category": "Code Quality & Verification",
+                    "description": "Executes static AST syntax checks, flake8, ruff, and type invariant validation prior to QA testing.",
+                    "benefits": "Catches syntax regressions and type mismatches early, reducing wasted worker debate loops and token consumption.",
+                    "primary_agents": ["coder", "qa-tester"],
+                },
+                {
+                    "id": "git_diff_inspector",
+                    "name": "Git Diff & Patch Inspector",
+                    "priority": "HIGH",
+                    "category": "Version Control & Conflict Prevention",
+                    "description": "Generates unified diffs, detects merge conflicts, and applies staged patches across git worktrees safely.",
+                    "benefits": "Enables the Architect and Reviewer agents to verify multi-file diffs contextually without modifying live working trees.",
+                    "primary_agents": ["architect", "coder", "sec-auditor"],
+                },
+                {
+                    "id": "container_sandbox_runner",
+                    "name": "Hardened Ephemeral Container Sandbox",
+                    "priority": "HIGH",
+                    "category": "Security & Isolation",
+                    "description": "Runs untrusted scripts, test executions, and dependency installations in isolated non-root containers with restricted egress.",
+                    "benefits": "Safeguards the host environment during dynamic script execution and allows the Security Auditor to execute untrusted code safely.",
+                    "primary_agents": ["sec-auditor", "qa-tester"],
+                },
+                {
+                    "id": "github_pr_sync",
+                    "name": "Bidirectional GitHub PR Sync",
+                    "priority": "MEDIUM",
+                    "category": "Release Engineering",
+                    "description": "Fetches PR comments, posts inline architectural annotations, and manages PR merges directly from the blackboard.",
+                    "benefits": "Connects multi-agent code reviews directly to real-world GitHub workflows and CI check suites.",
+                    "primary_agents": ["architect", "concierge-admin"],
+                },
+                {
+                    "id": "vector_memory_clusterer",
+                    "name": "Cross-Agent Vector Memory Clusterer",
+                    "priority": "MEDIUM",
+                    "category": "Memory & Knowledge Engineering",
+                    "description": "Performs semantic clustering, reflection, and deduplication of high-density pgvector memories across agents.",
+                    "benefits": "Prevents prompt context inflation while consolidating critical domain knowledge learned from past tasks.",
+                    "primary_agents": ["concierge-admin", "architect"],
+                },
+            ]
+
+            missing_tools = [t for t in recommended_catalog if t["id"] not in existing_tool_ids]
+
+            wf_id = req.workflow_id or "code_review_pipeline"
+            gap_summary = (
+                "### 🏛️ [Architect Agent Tool Gap Analysis]\n\n"
+                "Based on current multi-agent blackboard usage and industry best practices for autonomous agent engineering, "
+                "the following tool capabilities are recommended:\n\n"
+            )
+            for rec in missing_tools:
+                gap_summary += (
+                    f"**{rec['name']} (`{rec['id']}`)** — *Priority: {rec['priority']}* | Category: {rec['category']}\n"
+                    f"• **Description:** {rec['description']}\n"
+                    f"• **Key Benefits:** {rec['benefits']}\n"
+                    f"• **Assigned Agents:** {', '.join(rec['primary_agents'])}\n\n"
+                )
+
+            arch_entry = BlackboardEntryModel(
+                workflow_id=wf_id,
+                task_id="architect-tool-gap-analysis",
+                agent_id="architect",
+                entry_type="architecture_decision",
+                content=gap_summary,
+                metadata_={
+                    "source": "architect_agent",
+                    "existing_tool_count": len(existing_tool_ids),
+                    "missing_tools_identified": [t["id"] for t in missing_tools],
+                },
+            )
+            session.add(arch_entry)
+            await session.commit()
+            await session.refresh(arch_entry)
+
+            tool_calls_executed.append({
+                "tool": "architect_tool_gap_analysis",
+                "agent_id": "architect",
+                "existing_tool_count": len(existing_tool_ids),
+                "missing_tools_count": len(missing_tools),
+                "recommendations": [t["id"] for t in missing_tools],
+                "blackboard_entry_id": str(arch_entry.id),
+                "status": "ANALYSIS_COMPLETED_AND_POSTED",
+                "gap_summary": gap_summary,
+            })
+
         # Autonomous Dynamic Tool Synthesis Intent (Invariant 16)
         if any(
             k in lowered for k in [
@@ -434,7 +543,6 @@ class ConciergeAdminAgent:
                 "build tool", "make a tool", "make tool"
             ]
         ):
-            import re
             name_match = re.search(r"(?:named|called)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", msg, re.IGNORECASE)
             if not name_match:
                 name_match = re.search(r"tool\s+['\"]([a-zA-Z0-9_\-]+)['\"]", msg, re.IGNORECASE)
@@ -496,9 +604,6 @@ class ConciergeAdminAgent:
                 "approval policies", "show policies", "list policies", "revoke policy"
             ]
         ):
-            from app.models import ApprovalPolicyModel
-            import re
-
             if any(k in lowered for k in ["show", "list", "view"]):
                 stmt = select(ApprovalPolicyModel).order_by(ApprovalPolicyModel.created_at.desc())
                 res = await session.execute(stmt)
@@ -790,7 +895,23 @@ class ConciergeAdminAgent:
         llm_reply = await self._try_ollama_chat(
             msg, state_snapshot, tool_calls_executed
         )
-        if not llm_reply:
+        if llm_reply:
+            cleaned_reply, parsed_calls = self._sanitize_and_extract_tool_calls(llm_reply)
+            for pc in parsed_calls:
+                tool_calls_executed.append(pc)
+
+            has_architect_gap = any(t.get("tool") == "architect_tool_gap_analysis" for t in tool_calls_executed)
+            if has_architect_gap:
+                det_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
+                if not cleaned_reply or len(cleaned_reply.strip()) < 30 or not any(k in cleaned_reply for k in ["code_linter_ast", "git_diff_inspector", "container_sandbox_runner"]):
+                    llm_reply = det_reply
+                else:
+                    llm_reply = f"{cleaned_reply}\n\n{det_reply}"
+            elif not cleaned_reply or len(cleaned_reply.strip()) < 20:
+                llm_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
+            else:
+                llm_reply = cleaned_reply
+        else:
             llm_reply = self._format_deterministic_reply(
                 msg, state_snapshot, tool_calls_executed
             )
@@ -888,6 +1009,56 @@ class ConciergeAdminAgent:
         }
 
     @staticmethod
+    def _sanitize_and_extract_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+        if not text:
+            return "", []
+
+        extracted_calls: List[Dict[str, Any]] = []
+        cleaned = text
+
+        # Pattern: <tool_call>...</tool_call>
+        tool_call_blocks = re.findall(r"<tool_call>([\s\S]*?)</tool_call>", text, re.IGNORECASE)
+        for block in tool_call_blocks:
+            block_content = block.strip()
+            # Try JSON format first
+            if block_content.startswith("{") and block_content.endswith("}"):
+                try:
+                    parsed = json.loads(block_content)
+                    if isinstance(parsed, dict):
+                        extracted_calls.append(parsed)
+                        continue
+                except Exception:
+                    pass
+
+            # XML arg_key / arg_value parsing
+            tool_name_match = re.match(r"^([a-zA-Z0-9_\-]+)", block_content)
+            tool_name = tool_name_match.group(1) if tool_name_match else "unknown_tool"
+
+            args: Dict[str, Any] = {}
+            arg_matches = re.findall(
+                r"<arg_key>([\s\S]*?)</arg_key>\s*<arg_value>([\s\S]*?)</arg_value>",
+                block_content,
+                re.IGNORECASE,
+            )
+            for k, v in arg_matches:
+                args[k.strip()] = v.strip()
+
+            extracted_calls.append({
+                "tool": tool_name,
+                "arguments": args,
+                "extracted_from_llm": True,
+            })
+
+        # Strip all <tool_call>...</tool_call>
+        cleaned = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", cleaned, flags=re.IGNORECASE)
+        # Strip all dangling XML tags related to tool execution
+        cleaned = re.sub(r"</?(?:tool_call|arg_key|arg_value|function_call|tool)[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        # Clean up excess whitespace and empty lines
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+        return cleaned, extracted_calls
+
+    @staticmethod
     def _compute_grounding_strings(snapshot: Dict[str, Any]) -> Tuple[str, str]:
         now_utc = datetime.now(timezone.utc)
         op_tz = snapshot.get("operator_timezone")
@@ -921,11 +1092,12 @@ class ConciergeAdminAgent:
             f"You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane.\n"
             f"Current temporal grounding: {current_date_str}.\n"
             f"{tz_context}\n"
-            f"You have live access to platform state, stored pgvector memories, and executed MCP tools (web_search, bash_executor, store_memory, list_memories). "
+            f"You have live access to platform state, stored pgvector memories, and executed MCP tools (web_search, bash_executor, store_memory, list_memories, architect_tool_gap_analysis). "
             f"If store_memory was executed, confirm to the operator what was stored in pgvector. "
             f"If list_memories was executed, detail the stored memories per agent using the executed tool results. "
             f"Never claim you cannot access or read memories if list_memories was executed. "
             f"If web_search was executed, integrate the live search results and answer the operator accurately and concisely. "
+            f"CRITICAL: Never output raw XML tags such as <tool_call>, <arg_key>, or <arg_value> in your response to the operator. Present all findings, status updates, and agent recommendations in clean, readable Markdown. "
             f"Always answer the operator accurately and concisely."
         )
         compact_summary = {
@@ -1034,6 +1206,26 @@ class ConciergeAdminAgent:
             f"- **Vector Memories Stored (`pgvector`):** {snapshot['total_memories']}",
             f"- **Pending HITL Approval Tickets:** {len(snapshot['pending_hitl'])}",
         ]
+        if any(t["tool"] == "architect_tool_gap_analysis" for t in executed_tools):
+            at = next(t for t in executed_tools if t["tool"] == "architect_tool_gap_analysis")
+            if at.get("gap_summary"):
+                lines.insert(0, at["gap_summary"])
+            else:
+                lines.insert(
+                    0,
+                    f"### 🏛️ [Architect Agent Tool Gap Analysis]\n\n"
+                    f"Identified {at.get('missing_tools_count', 0)} high-value missing tools: {', '.join(f'`{r}`' for r in at.get('recommendations', []))}.\n\n"
+                )
+        if any(t["tool"] == "create_dynamic_tool" for t in executed_tools):
+            dt = next(t for t in executed_tools if t["tool"] == "create_dynamic_tool")
+            lines.append(
+                f"- **Dynamic Tool Synthesized:** Created executable tool `{dt.get('tool_id')}` for `@{dt.get('agent_id')}` (Command: `{dt.get('command')}`)."
+            )
+        if any(t["tool"] == "manage_approval_policy" for t in executed_tools):
+            mp = next(t for t in executed_tools if t["tool"] == "manage_approval_policy")
+            lines.append(
+                f"- **Approval Policy Configured:** Policy `{mp.get('policy_id')}` active for type `{mp.get('policy_type')}`."
+            )
         if any(t["tool"] == "store_memory" for t in executed_tools):
             sms = [t for t in executed_tools if t["tool"] == "store_memory"]
             for sm in sms:
