@@ -64,7 +64,7 @@ class TelegramChannel(BaseChannel):
     """
 
     def __init__(self):
-        self.default_cockpit_url = os.getenv("COCKPIT_URL", "http://192.168.1.100:5173")
+        self.default_cockpit_url = os.getenv("COCKPIT_URL", "http://192.168.8.109:5173")
 
     async def get_credentials(self) -> Dict[str, Any]:
         redis_client = await get_redis()
@@ -440,6 +440,8 @@ class ChannelGateway:
             await redis_client.set("channel:discord:webhook", payload.discord_webhook_url.strip())
         if payload.discord_enabled is not None:
             await redis_client.set("channel:discord:enabled", "true" if payload.discord_enabled else "false")
+        if payload.cockpit_url is not None:
+            await redis_client.set("channel:cockpit:url", payload.cockpit_url.strip())
 
         return await self.get_status()
 
@@ -554,9 +556,19 @@ class ChannelGateway:
                 await self.telegram.send_hitl_notification(t)
             return {"status": "ok", "command": "/approvals", "pending": len(tickets)}
 
-        # Command: /cockpit -> Send WebApp inline button
+        # Command: /cockpit -> Send WebApp inline button (or dynamically update URL)
         if text.startswith("/cockpit"):
-            cockpit_url = creds["cockpit_url"]
+            parts = text.split()
+            if len(parts) > 1 and (parts[1].startswith("http://") or parts[1].startswith("https://")):
+                new_url = parts[1].strip()
+                redis_client = await get_redis()
+                await redis_client.set("channel:cockpit:url", new_url)
+                cockpit_url = new_url
+                reply_text = f"🚀 *Cockpit URL Updated:*\n`{cockpit_url}`\n\nTap below to open:"
+            else:
+                cockpit_url = creds["cockpit_url"]
+                reply_text = f"🚀 *Multi-Agent Blackboard Cockpit*\nURL: `{cockpit_url}`\n\nTap below to open the mobile cockpit interface:"
+
             is_https = cockpit_url.startswith("https://")
             keyboard = [
                 [
@@ -566,7 +578,6 @@ class ChannelGateway:
                     }
                 ]
             ]
-            reply_text = "🚀 *Multi-Agent Blackboard Cockpit*\nTap below to open the mobile cockpit interface:"
             if token:
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -581,7 +592,7 @@ class ChannelGateway:
                         )
                 except Exception as e:
                     logger.warning("Telegram /cockpit reply failed: %s", e)
-            return {"status": "ok", "command": "/cockpit"}
+            return {"status": "ok", "command": "/cockpit", "cockpit_url": cockpit_url}
 
         # Command: /status -> Overview of agents, tools, workflows, HITL
         if text.startswith("/status"):
@@ -627,14 +638,18 @@ class ChannelGateway:
 
         if token:
             try:
-                async with httpx.AsyncClient(timeout=6.0) as client:
-                    await client.post(
-                        f"https://api.telegram.org/bot{token}/sendMessage",
-                        json={
-                            "chat_id": chat_id,
-                            "text": concierge_res.reply[:4000],
-                        },
-                    )
+                full_text = concierge_res.reply or ""
+                # Chunk messages up to 3800 chars to avoid Telegram's 4096 cutoff
+                chunks = [full_text[i:i + 3800] for i in range(0, max(1, len(full_text)), 3800)]
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    for chunk in chunks:
+                        await client.post(
+                            f"https://api.telegram.org/bot{token}/sendMessage",
+                            json={
+                                "chat_id": chat_id,
+                                "text": chunk,
+                            },
+                        )
             except Exception as e:
                 logger.warning("Telegram chat reply failed: %s", e)
 

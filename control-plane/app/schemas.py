@@ -382,6 +382,7 @@ class ChannelConfigRequest(BaseModel):
     telegram_enabled: Optional[bool] = None
     discord_webhook_url: Optional[str] = None
     discord_enabled: Optional[bool] = None
+    cockpit_url: Optional[str] = None
 
 
 class ChannelIncomingMessage(BaseModel):

@@ -8,11 +8,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -444,6 +446,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def capture_cockpit_url_middleware(request: Request, call_next):
+    """
+    Dynamically captures the operator's active Web Cockpit URL from browser requests (Origin/Referer),
+    ensuring Telegram links and Mini-App buttons automatically match the host IP, domain, or port.
+    """
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if origin:
+        try:
+            parsed = urlparse(origin)
+            if parsed.scheme in ("http", "https") and parsed.netloc:
+                host_only = parsed.netloc.split(":")[0].lower()
+                # Skip loopback or internal container names
+                if host_only not in ("localhost", "127.0.0.1", "control-plane", "web-cockpit"):
+                    cockpit_url = f"{parsed.scheme}://{parsed.netloc}"
+                    redis_client = get_redis()
+                    curr = await redis_client.get("channel:cockpit:url")
+                    if curr != cockpit_url:
+                        await redis_client.set("channel:cockpit:url", cockpit_url)
+        except Exception:
+            pass
+    return await call_next(request)
 
 
 @app.get("/health")

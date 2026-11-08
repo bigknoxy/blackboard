@@ -955,7 +955,7 @@ class ConciergeAdminAgent:
                     json={
                         "model": CONCIERGE_MODEL,
                         "temperature": 0.2,
-                        "max_tokens": 160,
+                        "max_tokens": 1024,
                         "chat_template_kwargs": {"enable_thinking": False},
                         "messages": messages_payload,
                     },
@@ -995,7 +995,7 @@ class ConciergeAdminAgent:
                         json={
                             "model": nim_model,
                             "temperature": 0.2,
-                            "max_tokens": 160,
+                            "max_tokens": 1024,
                             "messages": messages_payload,
                         },
                     )
