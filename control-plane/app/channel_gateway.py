@@ -21,7 +21,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_redis
+from app.database import get_redis, AsyncSessionLocal
 from app.models import (
     HITLTicketModel,
     ApprovalPolicyModel,
@@ -487,6 +487,73 @@ class ChannelGateway:
         creds = await self.telegram.get_credentials()
         token = creds["token"]
 
+        # Command: /start -> Auto-register chat_id and send welcome guide
+        if text.startswith("/start"):
+            redis_client = await get_redis()
+            await redis_client.set("channel:telegram:chat_id", chat_id)
+            await redis_client.set("channel:telegram:enabled", "true")
+
+            cockpit_url = creds["cockpit_url"]
+            is_https = cockpit_url.startswith("https://")
+            keyboard = [
+                [
+                    {
+                        "text": "🌐 Launch Blackboard Web Cockpit",
+                        "web_app": {"url": cockpit_url} if is_https else {"url": cockpit_url},
+                    }
+                ]
+            ]
+            welcome_text = (
+                f"👋 *Welcome to Multi-Agent Blackboard Cockpit!*\n\n"
+                f"✅ Your Telegram Chat ID (`{chat_id}`) has been **automatically registered**!\n\n"
+                f"• Real-time HITL gate alerts will appear here with 1-tap `[Approve]` / `[Reject]` buttons.\n"
+                f"• Type `/status` to see running agents and pending gates.\n"
+                f"• Type `/approvals` to review pending Human-in-the-Loop tickets.\n"
+                f"• Type `/cockpit` to launch the mobile Web Cockpit.\n"
+                f"• Or simply reply with any instruction to steer agents and query platform state!"
+            )
+            if token:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        await client.post(
+                            f"https://api.telegram.org/bot{token}/sendMessage",
+                            json={
+                                "chat_id": chat_id,
+                                "text": welcome_text,
+                                "parse_mode": "Markdown",
+                                "reply_markup": {"inline_keyboard": keyboard},
+                            },
+                        )
+                except Exception as e:
+                    logger.warning("Telegram /start reply failed: %s", e)
+            return {"status": "ok", "command": "/start", "chat_id": chat_id}
+
+        # Command: /approvals -> List pending HITL tickets with inline buttons
+        if text.startswith("/approvals"):
+            hitl_stmt = (
+                select(HITLTicketModel)
+                .where(HITLTicketModel.status == "PENDING")
+                .order_by(HITLTicketModel.created_at.desc())
+            )
+            res_hitl = await session.execute(hitl_stmt)
+            tickets = res_hitl.scalars().all()
+            if not tickets:
+                reply_text = "🎉 *No Pending Approvals*\nAll Human-in-the-Loop gates are currently clear!"
+                if token:
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as client:
+                            await client.post(
+                                f"https://api.telegram.org/bot{token}/sendMessage",
+                                json={"chat_id": chat_id, "text": reply_text, "parse_mode": "Markdown"},
+                            )
+                    except Exception as e:
+                        logger.warning("Telegram /approvals reply failed: %s", e)
+                return {"status": "ok", "command": "/approvals", "pending": 0}
+
+            for t in tickets[:5]:
+                await self.telegram.send_hitl_notification(t)
+            return {"status": "ok", "command": "/approvals", "pending": len(tickets)}
+
         # Command: /cockpit -> Send WebApp inline button
         if text.startswith("/cockpit"):
             cockpit_url = creds["cockpit_url"]
@@ -572,6 +639,50 @@ class ChannelGateway:
                 logger.warning("Telegram chat reply failed: %s", e)
 
         return {"status": "ok", "reply": concierge_res.reply}
+
+    async def start_telegram_polling(self) -> None:
+        """
+        Background long-polling loop for Telegram updates.
+        Allows local/homelab nodes to receive commands and inline button callbacks
+        without needing public HTTPS webhook domains or port forwarding.
+        """
+        last_offset = 0
+        logger.info("Starting Telegram background long-polling service...")
+        while True:
+            try:
+                creds = await self.telegram.get_credentials()
+                token = creds["token"]
+                enabled = creds["enabled"]
+
+                # Skip polling if not configured, disabled, or using a test mock token
+                if not token or not enabled or token.startswith("mock-"):
+                    await asyncio.sleep(4)
+                    continue
+
+                async with httpx.AsyncClient(timeout=35.0) as client:
+                    resp = await client.get(
+                        f"https://api.telegram.org/bot{token}/getUpdates",
+                        params={"offset": last_offset, "timeout": 20},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        updates = data.get("result", [])
+                        for update in updates:
+                            update_id = update.get("update_id", 0)
+                            last_offset = max(last_offset, update_id + 1)
+                            async with AsyncSessionLocal() as session:
+                                try:
+                                    await self.process_telegram_webhook(update, session)
+                                except Exception as e:
+                                    logger.warning("Error processing telegram update %s: %s", update_id, e)
+                    else:
+                        await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                logger.info("Telegram background polling stopped.")
+                break
+            except Exception as exc:
+                logger.debug("Telegram polling transient exception: %s", exc)
+                await asyncio.sleep(5)
 
 
 # Singleton Instance

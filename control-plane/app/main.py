@@ -420,9 +420,14 @@ async def lifespan(app: FastAPI):
     ws_manager._pubsub_task = asyncio.create_task(
         ws_manager.listen_redis_events()
     )
+    polling_task = asyncio.create_task(
+        channel_gateway.start_telegram_polling()
+    )
     yield
     if ws_manager._pubsub_task:
         ws_manager._pubsub_task.cancel()
+    if polling_task:
+        polling_task.cancel()
 
 
 app = FastAPI(
