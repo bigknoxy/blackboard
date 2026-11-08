@@ -39,6 +39,17 @@ def create_mock_httpx_client():
     return mock_instance
 
 
+@pytest.fixture(autouse=True)
+async def cleanup_telegram_redis():
+    yield
+    redis = await get_redis()
+    await redis.delete(
+        "channel:telegram:token",
+        "channel:telegram:chat_id",
+        "channel:telegram:enabled",
+    )
+
+
 @pytest.mark.asyncio
 async def test_falsifier_17_telegram_inbound_commands_and_concierge(db_session):
     """Falsifier 17.1: Telegram webhook processes /status, /cockpit, and conversational messages."""
