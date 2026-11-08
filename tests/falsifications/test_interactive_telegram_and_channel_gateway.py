@@ -143,9 +143,25 @@ async def test_falsifier_17_telegram_inbound_commands_and_concierge(db_session):
             assert res.status_code == 200
 
             mock_client.post.assert_called()
-            sent_json = mock_client.post.call_args[1]["json"]
-            assert "chat_id" in sent_json
-            assert len(sent_json["text"]) > 0
+            # Verify sendChatAction ("typing") was called
+            chat_action_calls = [
+                c[1]["json"]
+                for c in mock_client.post.call_args_list
+                if "sendChatAction" in str(c[0])
+            ]
+            assert len(chat_action_calls) >= 1
+            assert chat_action_calls[0]["action"] == "typing"
+            assert str(chat_action_calls[0]["chat_id"]) == "987654321"
+
+            # Verify message was sent
+            msg_calls = [
+                c[1]["json"]
+                for c in mock_client.post.call_args_list
+                if "sendMessage" in str(c[0])
+            ]
+            assert len(msg_calls) >= 1
+            assert "chat_id" in msg_calls[0]
+            assert len(msg_calls[0]["text"]) > 0
 
 
 @pytest.mark.asyncio

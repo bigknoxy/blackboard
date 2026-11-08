@@ -15,6 +15,7 @@ import os
 import json
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import httpx
@@ -79,6 +80,67 @@ class TelegramChannel(BaseChannel):
             "enabled": enabled,
             "cockpit_url": str(cockpit_url).strip(),
         }
+
+    async def send_chat_action(self, action: str = "typing", chat_id: Optional[str] = None) -> Dict[str, Any]:
+        """Send a chat action (such as 'typing') to Telegram."""
+        creds = await self.get_credentials()
+        tok = creds.get("token")
+        target_chat = chat_id or creds.get("chat_id")
+        if not tok or not target_chat:
+            return {"status": "SKIPPED"}
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                res = await client.post(
+                    f"https://api.telegram.org/bot{tok}/sendChatAction",
+                    json={"chat_id": target_chat, "action": action},
+                )
+                return {"status": "SENT", "http_code": res.status_code}
+        except Exception as exc:
+            logger.debug("Telegram sendChatAction failed: %s", exc)
+            return {"status": "ERROR", "error": str(exc)}
+
+    @asynccontextmanager
+    async def typing_indicator(self, token: Optional[str] = None, chat_id: Optional[str] = None):
+        """
+        Async context manager that sends an initial 'typing' action to the Telegram chat
+        and continues pulsing it periodically (every 4.5s) while a long-running turn
+        or LLM synthesis is being processed.
+        """
+        creds = await self.get_credentials()
+        tok = token or creds.get("token")
+        c_id = chat_id or creds.get("chat_id")
+
+        if not tok or not c_id:
+            yield
+            return
+
+        stop_event = asyncio.Event()
+
+        async def _typing_loop():
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                while not stop_event.is_set():
+                    try:
+                        await client.post(
+                            f"https://api.telegram.org/bot{tok}/sendChatAction",
+                            json={"chat_id": c_id, "action": "typing"},
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=4.5)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        pass
+
+        task = asyncio.create_task(_typing_loop())
+        try:
+            yield
+        finally:
+            stop_event.set()
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def send_text(self, text: str) -> Dict[str, Any]:
         creds = await self.get_credentials()
@@ -489,6 +551,10 @@ class ChannelGateway:
         creds = await self.telegram.get_credentials()
         token = creds["token"]
 
+        # Send immediate typing action to indicate message receipt
+        if token and chat_id:
+            await self.telegram.send_chat_action("typing", chat_id=chat_id)
+
         # Command: /start -> Auto-register chat_id and send welcome guide
         if text.startswith("/start"):
             redis_client = await get_redis()
@@ -628,13 +694,14 @@ class ChannelGateway:
             return {"status": "ok", "command": "/status"}
 
         # Default: Route to Concierge Admin Agent
-        concierge_res = await concierge_agent.handle_chat(
-            session,
-            ConciergeChatRequest(
-                message=text,
-                workflow_id="code_review_pipeline",
-            ),
-        )
+        async with self.telegram.typing_indicator(token=token, chat_id=chat_id):
+            concierge_res = await concierge_agent.handle_chat(
+                session,
+                ConciergeChatRequest(
+                    message=text,
+                    workflow_id="code_review_pipeline",
+                ),
+            )
 
         if token:
             try:
