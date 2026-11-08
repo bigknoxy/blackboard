@@ -19,6 +19,7 @@ Invariants:
    and WebApp links for instant 1-tap mobile decision-making.
 """
 
+import os
 import pytest
 import uuid
 import json
@@ -41,13 +42,32 @@ def create_mock_httpx_client():
 
 @pytest.fixture(autouse=True)
 async def cleanup_telegram_redis():
+    redis = await get_redis()
+    prev_tok = await redis.get("channel:telegram:token")
+    prev_chat = await redis.get("channel:telegram:chat_id")
+    prev_en = await redis.get("channel:telegram:enabled")
+    if prev_tok and prev_tok.startswith("mock-"):
+        prev_tok = os.getenv("TELEGRAM_BOT_TOKEN")
+    if prev_chat and prev_chat in ("987654321", "mock"):
+        prev_chat = os.getenv("TELEGRAM_CHAT_ID")
     yield
     redis = await get_redis()
-    await redis.delete(
-        "channel:telegram:token",
-        "channel:telegram:chat_id",
-        "channel:telegram:enabled",
-    )
+    env_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    env_chat = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    target_tok = prev_tok or env_token
+    target_chat = prev_chat or env_chat
+    if target_tok and not target_tok.startswith("mock-"):
+        await redis.set("channel:telegram:token", target_tok)
+    else:
+        await redis.delete("channel:telegram:token")
+    if target_chat and target_chat not in ("987654321", "mock"):
+        await redis.set("channel:telegram:chat_id", target_chat)
+    else:
+        await redis.delete("channel:telegram:chat_id")
+    if prev_en is not None:
+        await redis.set("channel:telegram:enabled", prev_en)
+    else:
+        await redis.set("channel:telegram:enabled", "true")
 
 
 @pytest.mark.asyncio

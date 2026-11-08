@@ -427,6 +427,19 @@ class ConciergeAdminAgent:
                     "recommendation": "Registered bash_executor (sandboxed execution with HITL approval gate) and web_search (external intelligence).",
                 })
 
+        # Capabilities & Help Intent ("What all can you do", "What can you do", "capabilities")
+        if any(
+            k in lowered for k in [
+                "what all can you do", "what can you do", "what are your capabilities",
+                "what all do you do", "what do you do", "how can you help",
+                "what are you capable of", "list capabilities", "show capabilities", "help"
+            ]
+        ):
+            tool_calls_executed.append({
+                "tool": "describe_capabilities",
+                "status": "COMPLETED",
+            })
+
         # Architect Tool Gap Analysis Intent (Comprehensive Best-Practice Tooling Audit)
         if (
             any(
@@ -901,12 +914,19 @@ class ConciergeAdminAgent:
                 tool_calls_executed.append(pc)
 
             has_architect_gap = any(t.get("tool") == "architect_tool_gap_analysis" for t in tool_calls_executed)
+            has_capabilities = any(t.get("tool") == "describe_capabilities" for t in tool_calls_executed)
             if has_architect_gap:
                 det_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
                 if not cleaned_reply or len(cleaned_reply.strip()) < 30 or not any(k in cleaned_reply for k in ["code_linter_ast", "git_diff_inspector", "container_sandbox_runner"]):
                     llm_reply = det_reply
                 else:
                     llm_reply = f"{cleaned_reply}\n\n{det_reply}"
+            elif has_capabilities:
+                det_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
+                if not cleaned_reply or len(cleaned_reply.strip()) < 30 or "capabilities" not in cleaned_reply.lower():
+                    llm_reply = det_reply
+                else:
+                    llm_reply = cleaned_reply
             elif not cleaned_reply or len(cleaned_reply.strip()) < 20:
                 llm_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
             else:
@@ -1189,6 +1209,33 @@ class ConciergeAdminAgent:
         executed_tools: List[Dict[str, Any]],
     ) -> str:
         date_str, tz_note = self._compute_grounding_strings(snapshot)
+
+        if any(t.get("tool") == "describe_capabilities" for t in executed_tools):
+            agent_names = ", ".join(f"`{a['id']}`" for a in snapshot["agents"])
+            wf_names = ", ".join(f"`{w['id']}`" for w in snapshot["workflows"])
+            return (
+                f"I'm the **Concierge Admin Agent** for the Multi-Agent Blackboard Control Plane. Here's what I can do:\n\n"
+                f"📊 **Platform Overview:**\n"
+                f"• **Active Agents ({len(snapshot['agents'])}):** {agent_names}\n"
+                f"• **Registered MCP Tools ({len(snapshot['tools'])}):** RBAC enforced + HITL gates active\n"
+                f"• **Workflows ({len(snapshot['workflows'])}):** {wf_names}\n"
+                f"• **Vector Memories Stored:** {snapshot['total_memories']} in `pgvector`\n"
+                f"• **Pending Approvals:** {len(snapshot['pending_hitl'])}\n\n"
+                f"🛠️ **Core Capabilities:**\n"
+                f"1. **Platform State Inspection** — View live system status, agent availability, and workflow health.\n"
+                f"2. **Memory Management** — Store and retrieve long-term episodic/semantic knowledge using pgvector embeddings (`store_memory`, `list_memories`).\n"
+                f"3. **Tool Execution & Synthesis** — Run tools (`web_search`, `bash_executor`), synthesize new custom tools on demand, or conduct tool gap audits.\n"
+                f"4. **Approval Policies & Trust Graduation** — Automatically approve safe tools or workflow stages via persistent auto-approval policies.\n"
+                f"5. **Workflow Coordination & Steering** — Trigger multi-agent pipelines, inject operator steering, and prune blackboard context.\n"
+                f"6. **Multi-Channel Orchestration** — Full control via Web Cockpit, Telegram Bot (`/status`, `/approvals`, `/cockpit`), and REST APIs.\n\n"
+                f"🧰 **Available Tools I Can Execute:**\n"
+                f"• `web_search` — Search the live internet for current information\n"
+                f"• `bash_executor` — Run shell commands and system diagnostics (HITL gated)\n"
+                f"• `store_memory` — Persist operator preferences and domain facts into pgvector\n"
+                f"• `list_memories` — Inspect stored memories across agents\n"
+                f"• `architect_tool_gap_analysis` — Audit missing platform capabilities\n\n"
+                f"What would you like me to help with today?"
+            )
 
         agent_list = ", ".join(
             f"`{a['id']}` ({a['role']})" for a in snapshot["agents"]

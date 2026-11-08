@@ -663,6 +663,24 @@ class ChannelGateway:
         """
         last_offset = 0
         logger.info("Starting Telegram background long-polling service...")
+
+        # Sync credentials from environment variables to Redis on boot
+        env_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        env_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        env_enabled = os.getenv("TELEGRAM_ENABLED", "true").lower() in ("true", "1", "yes")
+        if env_token:
+            try:
+                redis_client = await get_redis()
+                if not await redis_client.get("channel:telegram:token"):
+                    await redis_client.set("channel:telegram:token", env_token)
+                if env_chat_id and not await redis_client.get("channel:telegram:chat_id"):
+                    await redis_client.set("channel:telegram:chat_id", env_chat_id)
+                if await redis_client.get("channel:telegram:enabled") is None:
+                    await redis_client.set("channel:telegram:enabled", "true" if env_enabled else "false")
+                logger.info("Synchronized Telegram credentials from environment to Redis.")
+            except Exception as e:
+                logger.warning("Could not sync Telegram credentials from environment: %s", e)
+
         while True:
             try:
                 creds = await self.telegram.get_credentials()
@@ -685,6 +703,7 @@ class ChannelGateway:
                         for update in updates:
                             update_id = update.get("update_id", 0)
                             last_offset = max(last_offset, update_id + 1)
+                            logger.info("Processing inbound Telegram update: update_id=%s", update_id)
                             async with AsyncSessionLocal() as session:
                                 try:
                                     await self.process_telegram_webhook(update, session)

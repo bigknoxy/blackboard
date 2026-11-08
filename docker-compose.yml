@@ -78,6 +78,9 @@ services:
       LOCAL_OLLAMA_URL: ${LOCAL_OLLAMA_URL:-http://192.168.1.150:11434}
       DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-qwen2.5-coder:7b}
       COCKPIT_URL: ${COCKPIT_URL:-http://192.168.8.109:5173}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-true}
       WORKFLOWS_DIR: /workflows
     ports:
       - "0.0.0.0:8000:8000"
@@ -86,6 +89,7 @@ services:
       - ./workflows:/workflows
       - ./tests:/app/tests
       - ./agent-worker/app:/app/agent_worker_app
+      - ./pytest.ini:/app/pytest.ini
     depends_on:
       postgres:
         condition: service_started
