@@ -639,15 +639,9 @@ class WorkflowEngine:
             )
             # Notify external channels (Discord/Telegram) of pending HITL gate
             try:
-                from app.main import _notify_external_channels
+                from app.channel_gateway import channel_gateway
                 import asyncio
-                alert_text = (
-                    f"⚠️ **[Blackboard HITL Gate]** Approval requested for workflow `{workflow.id}`!\n"
-                    f"- Node: **{node.get('name', nid)}** (`{nid}`)\n"
-                    f"- Run ID: `{run.id}`\n"
-                    f"Review artifacts and approve in Web Cockpit: http://192.168.1.100:5173"
-                )
-                asyncio.create_task(_notify_external_channels(alert_text))
+                asyncio.create_task(channel_gateway.notify_hitl_ticket(ticket))
             except Exception:
                 pass
             return

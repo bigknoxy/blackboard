@@ -1738,55 +1738,17 @@ async def update_llm_router_config(
 # ==============================================================================
 # 8. EXTERNAL CHAT CHANNELS GATEWAY (Telegram / Discord / Easy Webhook)
 # ==============================================================================
+from app.channel_gateway import channel_gateway
+
+
 @app.get("/api/v1/channels/status")
 async def get_channels_status() -> Dict[str, Any]:
-    redis_client = await get_redis()
-    tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-    tg_chat_id = await redis_client.get("channel:telegram:chat_id") or os.getenv("TELEGRAM_CHAT_ID", "")
-    tg_enabled_raw = await redis_client.get("channel:telegram:enabled")
-    tg_enabled = (str(tg_enabled_raw).lower() in ("true", "1")) if tg_enabled_raw is not None else bool(tg_token and tg_chat_id)
-
-    dc_webhook = await redis_client.get("channel:discord:webhook") or os.getenv("DISCORD_WEBHOOK_URL", "")
-    dc_enabled_raw = await redis_client.get("channel:discord:enabled")
-    dc_enabled = (str(dc_enabled_raw).lower() in ("true", "1")) if dc_enabled_raw is not None else bool(dc_webhook)
-
-    return {
-        "telegram": {
-            "enabled": tg_enabled,
-            "configured": bool(tg_token and tg_chat_id),
-            "bot_token_masked": f"{tg_token[:5]}...{tg_token[-4:]}" if len(tg_token) > 10 else None,
-            "chat_id_masked": f"***{tg_chat_id[-4:]}" if len(tg_chat_id) > 4 else tg_chat_id or None,
-            "webhook_path": "/api/v1/channels/telegram/webhook",
-        },
-        "discord": {
-            "enabled": dc_enabled,
-            "configured": bool(dc_webhook),
-            "webhook_url_masked": f"{dc_webhook[:25]}...{dc_webhook[-6:]}" if len(dc_webhook) > 35 else None,
-            "inbound_path": "/api/v1/channels/message",
-        },
-        "easy_chat": {
-            "endpoint": "/api/v1/channels/message",
-            "supported_actions": ["steer: <directive>", "run workflow", "inspect state", "prune blackboard"],
-        },
-    }
+    return await channel_gateway.get_status()
 
 
 @app.post("/api/v1/channels/config")
 async def update_channels_config(payload: ChannelConfigRequest) -> Dict[str, Any]:
-    redis_client = await get_redis()
-    if payload.telegram_bot_token is not None:
-        await redis_client.set("channel:telegram:token", payload.telegram_bot_token.strip())
-    if payload.telegram_chat_id is not None:
-        await redis_client.set("channel:telegram:chat_id", payload.telegram_chat_id.strip())
-    if payload.telegram_enabled is not None:
-        await redis_client.set("channel:telegram:enabled", "true" if payload.telegram_enabled else "false")
-
-    if payload.discord_webhook_url is not None:
-        await redis_client.set("channel:discord:webhook", payload.discord_webhook_url.strip())
-    if payload.discord_enabled is not None:
-        await redis_client.set("channel:discord:enabled", "true" if payload.discord_enabled else "false")
-
-    return await get_channels_status()
+    return await channel_gateway.update_config(payload)
 
 
 @app.post("/api/v1/channels/test")
@@ -1794,63 +1756,13 @@ async def test_channels_broadcast(
     message: Optional[str] = Query(default="🔔 [Blackboard Test] Discord webhook connectivity verified!")
 ) -> Dict[str, Any]:
     """Manually send a test broadcast message to all enabled external channels."""
-    redis_client = await get_redis()
-    results: Dict[str, Any] = {}
-    
-    dc_webhook = await redis_client.get("channel:discord:webhook") or os.getenv("DISCORD_WEBHOOK_URL", "")
-    dc_en = await redis_client.get("channel:discord:enabled")
-    if dc_webhook and str(dc_en).lower() in ("true", "1", "none"):
-        try:
-            async with httpx.AsyncClient(timeout=6.0) as client:
-                res = await client.post(dc_webhook, json={"content": message})
-                results["discord"] = {"status": "DELIVERED", "http_code": res.status_code}
-        except Exception as exc:
-            results["discord"] = {"status": "ERROR", "error": str(exc)}
-    else:
-        results["discord"] = {"status": "SKIPPED", "reason": "not configured or disabled"}
-
-    tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-    tg_chat_id = await redis_client.get("channel:telegram:chat_id") or os.getenv("TELEGRAM_CHAT_ID", "")
-    tg_en = await redis_client.get("channel:telegram:enabled")
-    if tg_token and tg_chat_id and str(tg_en).lower() in ("true", "1", "none"):
-        try:
-            async with httpx.AsyncClient(timeout=6.0) as client:
-                res = await client.post(
-                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                    json={"chat_id": tg_chat_id, "text": message},
-                )
-                results["telegram"] = {"status": "DELIVERED", "http_code": res.status_code}
-        except Exception as exc:
-            results["telegram"] = {"status": "ERROR", "error": str(exc)}
-    else:
-        results["telegram"] = {"status": "SKIPPED", "reason": "not configured or disabled"}
-
+    results = await channel_gateway.notify_text(message)
     return {"message": message, "results": results}
 
 
 async def _notify_external_channels(text: str) -> None:
     """Publish a notification out to Telegram or Discord if enabled."""
-    try:
-        redis_client = await get_redis()
-        # Discord Webhook Notification
-        dc_webhook = await redis_client.get("channel:discord:webhook") or os.getenv("DISCORD_WEBHOOK_URL", "")
-        dc_en = await redis_client.get("channel:discord:enabled")
-        if dc_webhook and str(dc_en).lower() in ("true", "1", "none"):
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(dc_webhook, json={"content": text[:1900]})
-        
-        # Telegram Bot Notification
-        tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        tg_chat_id = await redis_client.get("channel:telegram:chat_id") or os.getenv("TELEGRAM_CHAT_ID", "")
-        tg_en = await redis_client.get("channel:telegram:enabled")
-        if tg_token and tg_chat_id and str(tg_en).lower() in ("true", "1", "none"):
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(
-                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                    json={"chat_id": tg_chat_id, "text": text[:4000], "parse_mode": "Markdown"},
-                )
-    except Exception as exc:
-        logger.warning("External channel notification failed: %s", exc)
+    await channel_gateway.notify_text(text)
 
 
 @app.post("/api/v1/channels/message")
@@ -1871,7 +1783,7 @@ async def incoming_channel_message(
     )
 
     reply_text = f"**[Blackboard {payload.channel.upper()}]**\n{concierge_res.reply}"
-    asyncio.create_task(_notify_external_channels(reply_text))
+    asyncio.create_task(channel_gateway.notify_text(reply_text))
 
     return {
         "channel": payload.channel,
@@ -1884,31 +1796,13 @@ async def incoming_channel_message(
 @app.post("/api/v1/channels/telegram/webhook")
 async def telegram_webhook_endpoint(
     request_data: Dict[str, Any], session: AsyncSession = Depends(get_db)
-) -> Dict[str, str]:
-    """Standard Telegram Bot webhook receiver."""
-    message = request_data.get("message", {})
-    text = message.get("text", "")
-    from_user = message.get("from", {}).get("username") or str(message.get("from", {}).get("id", "user"))
-    chat_id = str(message.get("chat", {}).get("id", ""))
-
-    if text:
-        concierge_res = await concierge_agent.handle_chat(
-            session,
-            ConciergeChatRequest(message=text, workflow_id="code_review_pipeline"),
-        )
-        redis_client = await get_redis()
-        tg_token = await redis_client.get("channel:telegram:token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        if tg_token and chat_id:
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(
-                        f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                        json={"chat_id": chat_id, "text": concierge_res.reply[:4000]},
-                    )
-            except Exception as e:
-                logger.warning("Telegram reply failed: %s", e)
-
-    return {"status": "ok"}
+) -> Dict[str, Any]:
+    """
+    Interactive Telegram Bot webhook receiver.
+    Handles commands (/status, /cockpit, /approvals, /steer), chat queries,
+    and 1-tap inline decision callbacks (callback_query).
+    """
+    return await channel_gateway.process_telegram_webhook(request_data, session)
 
 
 # ==============================================================================
