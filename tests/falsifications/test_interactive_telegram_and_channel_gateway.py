@@ -408,3 +408,86 @@ async def test_falsifier_17_telegram_tool_gap_analysis_and_xml_sanitization(db_s
     ).scalars().all()
     assert len(arch_entries) >= 1
     assert "code_linter_ast" in arch_entries[0].content
+
+
+@pytest.mark.asyncio
+async def test_falsifier_17_telegram_typing_indicator_weather_lookup_and_confirmation(db_session):
+    """Falsifier 17.6: Telegram displays typing indicator, executes weather lookup, and resolves confirmations contextually."""
+    app.dependency_overrides[get_db] = lambda: db_session
+
+    redis = await get_redis()
+    await redis.set("channel:telegram:token", "mock-token-123")
+    await redis.set("channel:telegram:chat_id", "987654321")
+    await redis.set("channel:telegram:enabled", "true")
+    await redis.set("operator:location", "KS")
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # 1. Test weather query & typing indicator
+        mock_client = create_mock_httpx_client()
+        with patch("app.channel_gateway.httpx.AsyncClient", return_value=mock_client):
+            chat_payload = {
+                "update_id": 4001,
+                "message": {
+                    "message_id": 101,
+                    "from": {"id": 111, "username": "bigknoxy777"},
+                    "chat": {"id": 987654321, "type": "private"},
+                    "text": "What's the weather in Topeka ks right now?",
+                },
+            }
+            res = await client.post("/api/v1/channels/telegram/webhook", json=chat_payload)
+            assert res.status_code == 200
+
+            # Verify sendChatAction: typing was sent
+            action_calls = [
+                c[1]["json"]
+                for c in mock_client.post.call_args_list
+                if "sendChatAction" in c[0][0]
+            ]
+            assert len(action_calls) >= 1
+            assert action_calls[0].get("action") == "typing"
+
+            # Verify weather reply was sent
+            sent_msgs = [
+                c[1]["json"]
+                for c in mock_client.post.call_args_list
+                if "sendMessage" in c[0][0]
+            ]
+            assert len(sent_msgs) >= 1
+            reply_text = sent_msgs[-1].get("text", "")
+            assert "weather" in reply_text.lower() or "temperature" in reply_text.lower() or "°" in reply_text
+
+        # 2. Test contextual confirmation "Yes do it"
+        # Seed conversation history in redis for this chat
+        history_key = "channel:telegram:history:987654321"
+        seed_history = [
+            {"role": "user", "content": "Can you check the weather?"},
+            {"role": "assistant", "content": "I can check the weather in Topeka, KS for you. Would you like me to do that?"},
+        ]
+        await redis.set(history_key, json.dumps(seed_history), ex=3600)
+
+        mock_client_2 = create_mock_httpx_client()
+        with patch("app.channel_gateway.httpx.AsyncClient", return_value=mock_client_2):
+            confirm_payload = {
+                "update_id": 4002,
+                "message": {
+                    "message_id": 102,
+                    "from": {"id": 111, "username": "bigknoxy777"},
+                    "chat": {"id": 987654321, "type": "private"},
+                    "text": "Yes do it",
+                },
+            }
+            res_confirm = await client.post("/api/v1/channels/telegram/webhook", json=confirm_payload)
+            assert res_confirm.status_code == 200
+
+            # Verify confirmation triggered weather lookup
+            confirm_msgs = [
+                c[1]["json"]
+                for c in mock_client_2.post.call_args_list
+                if "sendMessage" in c[0][0]
+            ]
+            assert len(confirm_msgs) >= 1
+            confirm_reply = confirm_msgs[-1].get("text", "")
+            assert "weather" in confirm_reply.lower() or "°" in confirm_reply or "topeka" in confirm_reply.lower()
+

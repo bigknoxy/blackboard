@@ -693,6 +693,16 @@ class ChannelGateway:
                     logger.warning("Telegram /status reply failed: %s", e)
             return {"status": "ok", "command": "/status"}
 
+        # Retrieve recent conversation history for this chat
+        history = []
+        try:
+            redis_client = await get_redis()
+            hist_raw = await redis_client.get(f"channel:telegram:history:{chat_id}")
+            if hist_raw:
+                history = json.loads(hist_raw)
+        except Exception as e:
+            logger.debug("Could not load Telegram chat history: %s", e)
+
         # Default: Route to Concierge Admin Agent
         async with self.telegram.typing_indicator(token=token, chat_id=chat_id):
             concierge_res = await concierge_agent.handle_chat(
@@ -700,12 +710,28 @@ class ChannelGateway:
                 ConciergeChatRequest(
                     message=text,
                     workflow_id="code_review_pipeline",
+                    history=history,
                 ),
             )
 
+        full_text = concierge_res.reply or ""
+
+        # Update conversation history in Redis
+        try:
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": full_text})
+            history = history[-10:]
+            redis_client = await get_redis()
+            await redis_client.set(
+                f"channel:telegram:history:{chat_id}",
+                json.dumps(history),
+                ex=86400,
+            )
+        except Exception as e:
+            logger.debug("Could not save Telegram chat history: %s", e)
+
         if token:
             try:
-                full_text = concierge_res.reply or ""
                 # Chunk messages up to 3800 chars to avoid Telegram's 4096 cutoff
                 chunks = [full_text[i:i + 3800] for i in range(0, max(1, len(full_text)), 3800)]
                 async with httpx.AsyncClient(timeout=10.0) as client:

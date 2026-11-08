@@ -128,6 +128,10 @@ class ConciergeAdminAgent:
             "description": "Execute live web and documentation search for external data, news, standards, or current events.",
         },
         {
+            "name": "weather_lookup",
+            "description": "Retrieve live real-time weather conditions, temperature, humidity, and forecasts for any location.",
+        },
+        {
             "name": "bash_executor",
             "description": "Execute shell or bash commands inside the environment (HITL gated).",
         },
@@ -164,6 +168,23 @@ class ConciergeAdminAgent:
         lowered = msg.lower()
         tool_calls_executed: List[Dict[str, Any]] = []
 
+        # Contextual confirmation resolution: e.g. "yes", "yes do it", "do it", "sure", "please"
+        is_confirmation = lowered in (
+            "yes", "yes do it", "do it", "sure", "please", "yes please",
+            "go ahead", "proceed", "do that", "yes do that", "yep", "yeah", "ok", "okay"
+        )
+        if is_confirmation and req.history:
+            last_assistant_msg = next((h["content"] for h in reversed(req.history) if h.get("role") == "assistant"), "")
+            if "weather" in last_assistant_msg.lower():
+                r = get_redis()
+                op_loc = await r.get("operator:location")
+                target_loc = op_loc or "Topeka, KS"
+                msg = f"get the current weather for {target_loc}"
+                lowered = msg.lower()
+            elif any(k in last_assistant_msg.lower() for k in ["search", "look up", "lookup"]):
+                msg = "search the web"
+                lowered = msg.lower()
+
         # Ensure concierge-admin exists in DB for foreign key relations
         c_agent = await session.get(AgentModel, "concierge-admin")
         if not c_agent:
@@ -172,9 +193,12 @@ class ConciergeAdminAgent:
                 name="Concierge Admin Agent",
                 role="Platform Operator & Meta-Tool Orchestrator",
                 system_prompt="You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane.",
-                allowed_tools=["web_search", "bash_executor", "repo_search"],
+                allowed_tools=["web_search", "weather_lookup", "bash_executor", "repo_search"],
             )
             session.add(c_agent)
+            await session.commit()
+        elif "weather_lookup" not in (c_agent.allowed_tools or []):
+            c_agent.allowed_tools = list(c_agent.allowed_tools or []) + ["weather_lookup"]
             await session.commit()
 
         # 1. Execute administrative meta-tools triggered by intent or explicit command
@@ -693,6 +717,47 @@ class ConciergeAdminAgent:
                     "status": "ACTIVE",
                 })
 
+        # Autonomous Weather Lookup Intent
+        if any(
+            k in lowered for k in [
+                "weather", "forecast", "temperature", "how cold", "how hot", "how warm"
+            ]
+        ) and not any(k in lowered for k in ["add tool", "register tool", "create tool"]):
+            from app.mcp_gateway import mcp_gateway
+
+            wl_tool = await session.get(MCPToolModel, "weather_lookup")
+            if not wl_tool:
+                wl_def = next((t for t in mcp_gateway.default_tool_catalog() if t["id"] == "weather_lookup"), None)
+                if wl_def:
+                    wl_tool = MCPToolModel(**wl_def)
+                    session.add(wl_tool)
+                    await session.commit()
+                    await session.refresh(wl_tool)
+
+            loc_match = re.search(r"(?:in|for|at|around)\s+([a-zA-Z0-9\s,]+?)(?:\s+right now|\s+today|\s+currently|\?|$)", msg, re.IGNORECASE)
+            location = loc_match.group(1).strip(" ?.,") if loc_match else ""
+            if not location or len(location) < 2 or location.lower() in ("ks", "kansas"):
+                location = "Topeka, KS"
+
+            weather_resp = await mcp_gateway.invoke_tool(
+                session=session,
+                req=ToolInvokeRequest(
+                    agent_id="concierge-admin",
+                    workflow_id=req.workflow_id or "code_review_pipeline",
+                    task_id="concierge-weather-lookup",
+                    tool_id="weather_lookup",
+                    arguments={"location": location},
+                    bypass_approval=True,
+                ),
+            )
+            if weather_resp.status == "EXECUTED":
+                tool_calls_executed.append({
+                    "tool": "weather_lookup",
+                    "location": location,
+                    "status": "EXECUTED",
+                    "result": weather_resp.result,
+                })
+
         # Autonomous Web Search Execution Intent
         if any(
             k in lowered for k in [
@@ -906,7 +971,7 @@ class ConciergeAdminAgent:
 
         # Attempt LLM synthesis via LAN Ollama if reachable; otherwise synthesize rich admin report
         llm_reply = await self._try_ollama_chat(
-            msg, state_snapshot, tool_calls_executed
+            msg, state_snapshot, tool_calls_executed, history=req.history
         )
         if llm_reply:
             cleaned_reply, parsed_calls = self._sanitize_and_extract_tool_calls(llm_reply)
@@ -915,12 +980,19 @@ class ConciergeAdminAgent:
 
             has_architect_gap = any(t.get("tool") == "architect_tool_gap_analysis" for t in tool_calls_executed)
             has_capabilities = any(t.get("tool") == "describe_capabilities" for t in tool_calls_executed)
+            has_weather = any(t.get("tool") == "weather_lookup" for t in tool_calls_executed)
             if has_architect_gap:
                 det_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
                 if not cleaned_reply or len(cleaned_reply.strip()) < 30 or not any(k in cleaned_reply for k in ["code_linter_ast", "git_diff_inspector", "container_sandbox_runner"]):
                     llm_reply = det_reply
                 else:
                     llm_reply = f"{cleaned_reply}\n\n{det_reply}"
+            elif has_weather:
+                det_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
+                if not cleaned_reply or len(cleaned_reply.strip()) < 30 or "weather" not in cleaned_reply.lower() or "°" not in cleaned_reply:
+                    llm_reply = det_reply
+                else:
+                    llm_reply = cleaned_reply
             elif has_capabilities:
                 det_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
                 if not cleaned_reply or len(cleaned_reply.strip()) < 30 or "capabilities" not in cleaned_reply.lower():
@@ -1106,13 +1178,15 @@ class ConciergeAdminAgent:
         user_msg: str,
         snapshot: Dict[str, Any],
         executed_tools: List[Dict[str, Any]],
+        history: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[str]:
         current_date_str, tz_context = self._compute_grounding_strings(snapshot)
         system_prompt = (
             f"You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane.\n"
             f"Current temporal grounding: {current_date_str}.\n"
             f"{tz_context}\n"
-            f"You have live access to platform state, stored pgvector memories, and executed MCP tools (web_search, bash_executor, store_memory, list_memories, architect_tool_gap_analysis). "
+            f"You have live access to platform state, stored pgvector memories, and executed MCP tools (web_search, weather_lookup, bash_executor, store_memory, list_memories, architect_tool_gap_analysis). "
+            f"If weather_lookup was executed, present current weather conditions, temperature, humidity, and wind clearly. "
             f"If store_memory was executed, confirm to the operator what was stored in pgvector. "
             f"If list_memories was executed, detail the stored memories per agent using the executed tool results. "
             f"Never claim you cannot access or read memories if list_memories was executed. "
@@ -1128,8 +1202,17 @@ class ConciergeAdminAgent:
             "operator_timezone": snapshot.get("operator_timezone"),
             "operator_location": snapshot.get("operator_location"),
         }
+
+        history_msgs = []
+        if history:
+            for h in history[-6:]:
+                role = h.get("role", "user")
+                if role in ("user", "assistant"):
+                    history_msgs.append({"role": role, "content": str(h.get("content", ""))})
+
         messages_payload = [
             {"role": "system", "content": system_prompt},
+            *history_msgs,
             {
                 "role": "user",
                 "content": (
@@ -1230,6 +1313,7 @@ class ConciergeAdminAgent:
                 f"6. **Multi-Channel Orchestration** — Full control via Web Cockpit, Telegram Bot (`/status`, `/approvals`, `/cockpit`), and REST APIs.\n\n"
                 f"🧰 **Available Tools I Can Execute:**\n"
                 f"• `web_search` — Search the live internet for current information\n"
+                f"• `weather_lookup` — Retrieve real-time weather, temperature, humidity, and forecast data\n"
                 f"• `bash_executor` — Run shell commands and system diagnostics (HITL gated)\n"
                 f"• `store_memory` — Persist operator preferences and domain facts into pgvector\n"
                 f"• `list_memories` — Inspect stored memories across agents\n"
@@ -1253,6 +1337,26 @@ class ConciergeAdminAgent:
             f"- **Vector Memories Stored (`pgvector`):** {snapshot['total_memories']}",
             f"- **Pending HITL Approval Tickets:** {len(snapshot['pending_hitl'])}",
         ]
+        if any(t.get("tool") == "weather_lookup" and t.get("result") for t in executed_tools):
+            wt = next(t for t in executed_tools if t.get("tool") == "weather_lookup" and t.get("result"))
+            wres = wt.get("result", {})
+            wdata = wres.get("data", {})
+            loc = wres.get("location") or wdata.get("location") or wt.get("location", "Topeka, KS")
+            temp_f = wdata.get("temperature_f", "N/A")
+            temp_c = wdata.get("temperature_c", "N/A")
+            cond = str(wdata.get("condition", "N/A")).strip()
+            humidity = wdata.get("humidity", "N/A")
+            wind = wdata.get("wind", "N/A")
+            feels_like = wdata.get("feels_like_f")
+            feels_str = f" (feels like {feels_like})" if feels_like else ""
+            lines.insert(0, (
+                f"### 🌤️ Current Weather for {loc}\n\n"
+                f"• **Condition:** {cond}\n"
+                f"• **Temperature:** {temp_f} ({temp_c}){feels_str}\n"
+                f"• **Humidity:** {humidity}\n"
+                f"• **Wind:** {wind}\n"
+                f"• **Observed:** {date_str}\n\n"
+            ))
         if any(t["tool"] == "architect_tool_gap_analysis" for t in executed_tools):
             at = next(t for t in executed_tools if t["tool"] == "architect_tool_gap_analysis")
             if at.get("gap_summary"):
