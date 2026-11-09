@@ -491,3 +491,144 @@ async def test_falsifier_17_telegram_typing_indicator_weather_lookup_and_confirm
             confirm_reply = confirm_msgs[-1].get("text", "")
             assert "weather" in confirm_reply.lower() or "°" in confirm_reply or "topeka" in confirm_reply.lower()
 
+
+@pytest.mark.asyncio
+async def test_falsifier_17_concurrent_telegram_approvals_and_markup_replacement():
+    """Falsifier 17.7: Multiple concurrent Telegram HITL callbacks must both succeed and update inline buttons."""
+    import asyncio
+    from app.database import AsyncSessionLocal
+    app.dependency_overrides.pop(get_db, None)
+
+    redis = await get_redis()
+    await redis.set("channel:telegram:token", "mock-token-123")
+    await redis.set("channel:telegram:chat_id", "987654321")
+
+    # Create two pending tickets using an isolated session
+    ticket_1_id = uuid.uuid4()
+    ticket_2_id = uuid.uuid4()
+    async with AsyncSessionLocal() as session:
+        t1 = HITLTicketModel(
+            id=ticket_1_id,
+            workflow_id="code_review_pipeline",
+            task_id="task-multi-1",
+            agent_id="coder",
+            gate_type="tool_approval",
+            tool_id="git_branch_commit",
+            tool_arguments={"branch": "feat/tg-1", "message": "First concurrent approval"},
+            status="PENDING",
+        )
+        t2 = HITLTicketModel(
+            id=ticket_2_id,
+            workflow_id="code_review_pipeline",
+            task_id="task-multi-2",
+            agent_id="coder",
+            gate_type="tool_approval",
+            tool_id="git_branch_commit",
+            tool_arguments={"branch": "feat/tg-2", "message": "Second concurrent approval"},
+            status="PENDING",
+        )
+        session.add_all([t1, t2])
+        await session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        mock_client = create_mock_httpx_client()
+        with patch("app.channel_gateway.httpx.AsyncClient", return_value=mock_client):
+            cb1 = {
+                "update_id": 5001,
+                "callback_query": {
+                    "id": "cb_query_1",
+                    "from": {"id": 111, "username": "bigknoxy777"},
+                    "message": {
+                        "message_id": 201,
+                        "chat": {"id": 987654321},
+                        "text": "🛡️ [Blackboard Tool HITL] Agent coder requested git_branch_commit 1",
+                    },
+                    "data": f"hitl:{ticket_1_id}:APPROVED:tool",
+                },
+            }
+            cb2 = {
+                "update_id": 5002,
+                "callback_query": {
+                    "id": "cb_query_2",
+                    "from": {"id": 111, "username": "bigknoxy777"},
+                    "message": {
+                        "message_id": 202,
+                        "chat": {"id": 987654321},
+                        "text": "🛡️ [Blackboard Tool HITL] Agent coder requested git_branch_commit 2",
+                    },
+                    "data": f"hitl:{ticket_2_id}:APPROVED:tool",
+                },
+            }
+
+            # Fire both approvals concurrently
+            res1, res2 = await asyncio.gather(
+                client.post("/api/v1/channels/telegram/webhook", json=cb1),
+                client.post("/api/v1/channels/telegram/webhook", json=cb2),
+            )
+            assert res1.status_code == 200
+            assert res2.status_code == 200
+
+            # Verify both callbacks were answered
+            answer_calls = [
+                c[1]["json"]
+                for c in mock_client.post.call_args_list
+                if "answerCallbackQuery" in c[0][0]
+            ]
+            assert len(answer_calls) >= 2
+
+            # Verify editMessageText was called for BOTH message IDs (201 and 202)
+            edit_calls = [
+                c[1]["json"]
+                for c in mock_client.post.call_args_list
+                if "editMessageText" in c[0][0]
+            ]
+            edit_msg_ids = {c.get("message_id") for c in edit_calls}
+            assert 201 in edit_msg_ids
+            assert 202 in edit_msg_ids
+
+            # Verify reply_markup in editMessageText includes resolved status badge
+            for c in edit_calls:
+                markup = c.get("reply_markup", {})
+                kb = markup.get("inline_keyboard", [])
+                assert len(kb) > 0
+                first_btn_text = kb[0][0].get("text", "")
+                assert "APPROVED" in first_btn_text or "✅" in first_btn_text
+
+        # Verify both tickets are APPROVED in DB using isolated session
+        async with AsyncSessionLocal() as session:
+            db_t1 = await session.get(HITLTicketModel, ticket_1_id)
+            db_t2 = await session.get(HITLTicketModel, ticket_2_id)
+            assert db_t1.status == "APPROVED"
+            assert db_t2.status == "APPROVED"
+            assert db_t1.reviewer_id == "@bigknoxy777"
+            assert db_t2.reviewer_id == "@bigknoxy777"
+
+
+@pytest.mark.asyncio
+async def test_falsifier_17_live_sports_scoreboard_accuracy(db_session):
+    """Falsifier 17.8: Live sports queries via web_search retrieve real scoreboard data without hallucinating opponents."""
+    from app.mcp_gateway import mcp_gateway, ToolInvokeRequest
+    app.dependency_overrides[get_db] = lambda: db_session
+
+    req = ToolInvokeRequest(
+        agent_id="researcher",
+        workflow_id="test_wf",
+        task_id="test_task",
+        tool_id="web_search",
+        arguments={"query": "What was the score of the KC Chiefs game today?"},
+        bypass_approval=True,
+    )
+    result = await mcp_gateway.invoke_tool(db_session, req)
+    assert result.status == "EXECUTED"
+    res_data = result.result
+    assert "results" in res_data
+    items = res_data["results"]
+    assert len(items) > 0
+    joined_snippets = " ".join([i.get("snippet", "") for i in items])
+    # Must contain Chiefs and genuine NFL team
+    assert "Chiefs" in joined_snippets
+    assert "NFL" in joined_snippets or "Kansas City" in joined_snippets
+
+

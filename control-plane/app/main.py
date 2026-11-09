@@ -1349,6 +1349,8 @@ async def decide_hitl_ticket(
 
     ticket.status = payload.decision
     ticket.reviewer_comment = payload.reviewer_comment
+    if payload.reviewer_id:
+        ticket.reviewer_id = payload.reviewer_id
     ticket.resolved_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(ticket)

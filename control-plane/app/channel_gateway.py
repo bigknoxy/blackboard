@@ -244,6 +244,10 @@ class TelegramChannel(BaseChannel):
         chat_id = str(message.get("chat", {}).get("id", ""))
         message_id = message.get("message_id")
 
+        if data == "noop":
+            await self._answer_callback(cb_id, "Ticket is already resolved.")
+            return {"status": "NOOP"}
+
         parts = data.split(":")
         if len(parts) < 4 or parts[0] != "hitl":
             return {"status": "IGNORED", "reason": "invalid_callback_data"}
@@ -259,9 +263,28 @@ class TelegramChannel(BaseChannel):
             await self._answer_callback(cb_id, "Ticket not found.")
             return {"status": "ERROR", "reason": "ticket_not_found"}
 
+        creds = await self.get_credentials()
+        cockpit_url = creds.get("cockpit_url", "http://localhost:5173")
+        is_https = cockpit_url.startswith("https://")
+
         if ticket.status != "PENDING":
+            status_icon = "✅" if ticket.status == "APPROVED" else "❌"
             await self._answer_callback(cb_id, f"Ticket already {ticket.status}.")
+            resolved_text = (
+                f"{status_icon} *[Ticket {ticket.status}]* Tool `{ticket.tool_id}`\n"
+                f"• Already resolved with status `{ticket.status}`\n"
+                f"• Resolved at: `{ticket.resolved_at.strftime('%Y-%m-%d %H:%M:%S UTC') if ticket.resolved_at else 'Earlier'}`"
+            )
+            keyboard = [
+                [{"text": f"{status_icon} {ticket.status}", "callback_data": "noop"}],
+                [{"text": "🌐 Open Web Cockpit", "web_app": {"url": cockpit_url}} if is_https else {"text": "🌐 Open Web Cockpit", "url": cockpit_url}],
+            ]
+            await self._edit_message_text(chat_id, message_id, resolved_text, reply_markup={"inline_keyboard": keyboard})
             return {"status": "ALREADY_RESOLVED"}
+
+        # Immediate callback acknowledgment to stop spinner on Telegram client
+        ack_text = f"Deciding: {decision} ({policy_mode})..."
+        await self._answer_callback(cb_id, ack_text)
 
         # Resolve ticket in DB
         reviewer_tag = f"@{from_user}"
@@ -309,6 +332,32 @@ class TelegramChannel(BaseChannel):
             session.add(bb_entry)
             await session.commit()
 
+            # If workflow_activator was approved, persist the new workflow into the database
+            if ticket.tool_id == "workflow_activator" and isinstance(tool_result, dict):
+                act_wf_id = tool_result.get("workflow_id")
+                act_yaml = (ticket.tool_arguments or {}).get("yaml_content")
+                if act_wf_id and act_yaml:
+                    existing_wf = await session.get(WorkflowModel, act_wf_id)
+                    parsed_g = workflow_engine.parse_yaml_to_graph(act_yaml)
+                    bpmn_x = workflow_engine.graph_to_bpmn_xml(act_wf_id, tool_result.get("workflow_name", act_wf_id), parsed_g)
+                    if existing_wf:
+                        existing_wf.name = tool_result.get("workflow_name", existing_wf.name)
+                        existing_wf.description = tool_result.get("description", existing_wf.description)
+                        existing_wf.state_graph = parsed_g
+                        existing_wf.yaml_source = act_yaml
+                        existing_wf.bpmn_xml = bpmn_x
+                    else:
+                        new_wf = WorkflowModel(
+                            id=act_wf_id,
+                            name=tool_result.get("workflow_name", act_wf_id),
+                            description=tool_result.get("description", "Architect-generated workflow"),
+                            state_graph=parsed_g,
+                            yaml_source=act_yaml,
+                            bpmn_xml=bpmn_x,
+                        )
+                        session.add(new_wf)
+                    await session.commit()
+
         # If policy graduation requested
         if decision == "APPROVED" and policy_mode == "tool" and ticket.tool_id:
             policy = ApprovalPolicyModel(
@@ -322,25 +371,25 @@ class TelegramChannel(BaseChannel):
             session.add(policy)
             await session.commit()
 
-        # If workflow user_task, advance workflow
+        # If workflow user_task, advance or fail workflow
         if ticket.gate_type == "user_task":
             run_id_str = (ticket.tool_arguments or {}).get("run_id")
             wf = await session.get(WorkflowModel, ticket.workflow_id)
             if run_id_str and wf:
                 try:
                     run = await session.get(WorkflowRunModel, uuid.UUID(str(run_id_str)))
-                    if run and decision == "APPROVED":
-                        await workflow_engine.advance_from_node(
-                            session, wf, run, ticket.tool_id, branch_outcome="PASS"
-                        )
+                    if run:
+                        if decision == "APPROVED":
+                            await workflow_engine.advance_from_node(
+                                session, wf, run, ticket.tool_id, branch_outcome="PASS"
+                            )
+                        else:
+                            run.status = "FAILED"
+                            await session.commit()
                 except Exception as ex:
                     logger.warning("Failed to advance workflow from telegram callback: %s", ex)
 
-        # Acknowledge callback query
-        ack_text = f"Ticket {decision}! (Policy: {policy_mode})"
-        await self._answer_callback(cb_id, ack_text)
-
-        # Update Telegram message
+        # Update Telegram message & replace interactive buttons with confirmed badge
         status_icon = "✅" if decision == "APPROVED" else "❌"
         updated_text = (
             f"{status_icon} *[Ticket {decision}]* Tool `{ticket.tool_id}`\n"
@@ -348,7 +397,11 @@ class TelegramChannel(BaseChannel):
             f"• Policy: `{policy_mode}`\n"
             f"• Resolved at: `{ticket.resolved_at.strftime('%Y-%m-%d %H:%M:%S UTC')}`"
         )
-        await self._edit_message_text(chat_id, message_id, updated_text)
+        resolved_keyboard = [
+            [{"text": f"{status_icon} {decision} ({policy_mode})", "callback_data": "noop"}],
+            [{"text": "🌐 Open Web Cockpit", "web_app": {"url": cockpit_url}} if is_https else {"text": "🌐 Open Web Cockpit", "url": cockpit_url}],
+        ]
+        await self._edit_message_text(chat_id, message_id, updated_text, reply_markup={"inline_keyboard": resolved_keyboard})
 
         return {
             "status": "RESOLVED",
@@ -370,21 +423,36 @@ class TelegramChannel(BaseChannel):
         except Exception:
             pass
 
-    async def _edit_message_text(self, chat_id: str, message_id: int, text: str) -> None:
+    async def _edit_message_text(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        reply_markup: Optional[Dict[str, Any]] = None,
+    ) -> None:
         creds = await self.get_credentials()
         if not creds["token"] or not chat_id or not message_id:
             return
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "Markdown",
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
-                await client.post(
+                res = await client.post(
                     f"https://api.telegram.org/bot{creds['token']}/editMessageText",
-                    json={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "text": text,
-                        "parse_mode": "Markdown",
-                    },
+                    json=payload,
                 )
+                if res.status_code != 200:
+                    payload.pop("parse_mode", None)
+                    await client.post(
+                        f"https://api.telegram.org/bot{creds['token']}/editMessageText",
+                        json=payload,
+                    )
         except Exception:
             pass
 
@@ -797,11 +865,7 @@ class ChannelGateway:
                             update_id = update.get("update_id", 0)
                             last_offset = max(last_offset, update_id + 1)
                             logger.info("Processing inbound Telegram update: update_id=%s", update_id)
-                            async with AsyncSessionLocal() as session:
-                                try:
-                                    await self.process_telegram_webhook(update, session)
-                                except Exception as e:
-                                    logger.warning("Error processing telegram update %s: %s", update_id, e)
+                            asyncio.create_task(self._process_single_telegram_update(update))
                     else:
                         await asyncio.sleep(5)
             except asyncio.CancelledError:
@@ -810,6 +874,13 @@ class ChannelGateway:
             except Exception as exc:
                 logger.debug("Telegram polling transient exception: %s", exc)
                 await asyncio.sleep(5)
+
+    async def _process_single_telegram_update(self, update: Dict[str, Any]) -> None:
+        async with AsyncSessionLocal() as session:
+            try:
+                await self.process_telegram_webhook(update, session)
+            except Exception as e:
+                logger.warning("Error processing telegram update %s: %s", update.get("update_id"), e)
 
 
 # Singleton Instance

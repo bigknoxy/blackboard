@@ -72,6 +72,9 @@ async def init_db() -> None:
                 await conn.execute(
                     text("ALTER TABLE hitl_tickets ADD COLUMN IF NOT EXISTS execution_result JSONB")
                 )
+                await conn.execute(
+                    text("ALTER TABLE hitl_tickets ADD COLUMN IF NOT EXISTS reviewer_id VARCHAR(128)")
+                )
             return
         except Exception:
             if attempt == 89:

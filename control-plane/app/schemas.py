@@ -300,6 +300,7 @@ class WorkflowRunResponse(BaseModel):
 class HITLDecisionRequest(BaseModel):
     decision: Literal["APPROVED", "REJECTED"]
     reviewer_comment: Optional[str] = None
+    reviewer_id: Optional[str] = None
     auto_approve_policy: Optional[Literal["tool", "command_pattern", "workflow_node"]] = None
     pattern: Optional[str] = None
 
@@ -346,6 +347,7 @@ class HITLTicketResponse(BaseModel):
     tool_arguments: Dict[str, Any]
     status: str
     reviewer_comment: Optional[str] = None
+    reviewer_id: Optional[str] = None
     execution_result: Optional[Dict[str, Any]] = None
     created_at: datetime
     resolved_at: Optional[datetime] = None

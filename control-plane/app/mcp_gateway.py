@@ -705,6 +705,7 @@ class MCPToolboxGateway:
 
         now_utc = datetime.now(timezone.utc)
         date_str = now_utc.strftime("%A, %B %d, %Y")
+        results: List[Dict[str, Any]] = []
 
         if any(k in low_q for k in ["weather", "forecast", "temperature", "climate"]):
             loc = clean_q
@@ -732,28 +733,75 @@ class MCPToolboxGateway:
                     "relevance_score": 0.95,
                 },
             ]
-        elif any(k in low_q for k in ["nfl", "football", "game", "schedule", "score"]):
-            results = [
-                {
-                    "title": f"NFL Schedule & Matchups ({date_str})",
-                    "snippet": f"Official NFL schedule and matchup report for {date_str}. Key fixtures, broadcast networks, kickoff times, and division standings.",
-                    "url": "https://www.nfl.com/scores",
-                    "relevance_score": 0.98,
-                },
-                {
-                    "title": "NFL Game Day Coverage & Injury Reports",
-                    "snippet": "Active team rosters, injury reports, weather impacts, and broadcast schedules across CBS, FOX, NBC, and ESPN.",
-                    "url": "https://www.espn.com/nfl/schedule",
-                    "relevance_score": 0.94,
-                },
-                {
-                    "title": "NFL Standings, Power Rankings & Matchup Previews",
-                    "snippet": "Analysis of key matchups, team statistics, and playoff picture updates.",
-                    "url": "https://sports.yahoo.com/nfl",
-                    "relevance_score": 0.90,
-                },
-            ][:num_results]
-        else:
+        elif any(k in low_q for k in ["nfl", "football", "chiefs", "score", "game", "matchup", "standings"]):
+            try:
+                with httpx.Client(timeout=4.0) as client:
+                    espn_res = client.get("https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard")
+                    if espn_res.status_code == 200:
+                        events = espn_res.json().get("events", [])
+                        matching_events = []
+                        for ev in events:
+                            name = ev.get("name", "")
+                            status_detail = ev.get("status", {}).get("type", {}).get("detail", "Scheduled")
+                            comps = ev.get("competitions", [{}])[0].get("competitors", [])
+                            score_parts = []
+                            for c in comps:
+                                team_name = c.get("team", {}).get("displayName", "")
+                                score = c.get("score", "0")
+                                is_winner = c.get("winner", False)
+                                win_mark = " (Winner)" if is_winner else ""
+                                score_parts.append(f"{team_name} {score}{win_mark}")
+                            score_str = " vs ".join(score_parts) if score_parts else name
+
+                            # Target check for Chiefs or specific team queries
+                            if any(k in low_q for k in ["chiefs", "kansas city"]) and "Chiefs" not in name:
+                                continue
+
+                            matching_events.append({
+                                "title": f"NFL: {name} — {status_detail}",
+                                "snippet": f"{score_str}. Status: {status_detail}. Official ESPN live scoreboard data.",
+                                "url": f"https://www.espn.com/nfl/game/_/gameId/{ev.get('id', '')}",
+                                "relevance_score": 0.99,
+                            })
+                        if matching_events:
+                            results = matching_events[:num_results]
+            except Exception as e:
+                logger.debug("ESPN scoreboard lookup failed: %s", e)
+
+        # Real live web search via DuckDuckGo
+        if not results:
+            try:
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                with httpx.Client(timeout=5.0) as client:
+                    ddg_res = client.post(
+                        "https://html.duckduckgo.com/html/",
+                        data={"q": clean_q},
+                        headers=headers,
+                    )
+                    if ddg_res.status_code == 200:
+                        raw_matches = re.findall(
+                            r'<a class="result__snippet[^"]*"[^>]*>(.*?)</a>', ddg_res.text
+                        )
+                        raw_titles = re.findall(
+                            r'<a class="result__url[^"]*"[^>]*>(.*?)</a>', ddg_res.text
+                        )
+                        for i in range(min(num_results, len(raw_matches))):
+                            snippet_clean = re.sub(r"<[^>]+>", "", raw_matches[i]).strip()
+                            url_clean = re.sub(r"<[^>]+>", "", raw_titles[i]).strip() if i < len(raw_titles) else "https://duckduckgo.com"
+                            if not url_clean.startswith("http"):
+                                url_clean = f"https://{url_clean}"
+                            if snippet_clean:
+                                results.append({
+                                    "title": f"Web Result: {clean_q[:40]}",
+                                    "snippet": snippet_clean,
+                                    "url": url_clean,
+                                    "relevance_score": 0.92,
+                                })
+            except Exception as e:
+                logger.debug("Live DuckDuckGo search failed: %s", e)
+
+        # Architectural fallback for offline mode or test mocks
+        if not results:
             results = [
                 {
                     "title": f"Technical Specification & Architecture: {clean_q}",
@@ -766,12 +814,6 @@ class MCPToolboxGateway:
                     "snippet": f"Industry consensus and benchmark comparisons on {clean_q} for distributed multi-agent systems.",
                     "url": f"https://standards.local/patterns/{clean_q.replace(' ', '_').lower()[:40]}",
                     "relevance_score": 0.91,
-                },
-                {
-                    "title": f"Community Verification & Edge Cases: {clean_q}",
-                    "snippet": f"Verified implementation examples and edge-case mitigations regarding {clean_q}.",
-                    "url": f"https://knowledge.local/q/{clean_q.replace(' ', '_').lower()[:40]}",
-                    "relevance_score": 0.87,
                 },
             ][:num_results]
         return {
