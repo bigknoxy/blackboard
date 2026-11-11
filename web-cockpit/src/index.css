@@ -7,3 +7,12 @@
   background-color: #f8fafc;
   border-radius: 0.5rem;
 }
+
+/* Ergonomic clean scrollbar hiding for horizontal chip carousels */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

@@ -9,6 +9,7 @@ import AgentManager from "./components/AgentManager";
 import ToolsRegistry from "./components/ToolsRegistry";
 import UserGuide from "./components/UserGuide";
 import BacklogModal from "./components/BacklogModal";
+import WorkflowTopBar from "./components/WorkflowTopBar";
 import {
   NAVIGATION_TABS,
   MORE_DRAWER_ITEMS,
@@ -35,6 +36,7 @@ export default function App() {
   const [backlogOpen, setBacklogOpen] = useState(false);
   const [backlogCount, setBacklogCount] = useState(0);
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [homePrefillPrompt, setHomePrefillPrompt] = useState("");
 
   const PANEL_ORDER = [
     "concierge",
@@ -351,6 +353,27 @@ export default function App() {
         )}
       </header>
 
+      {/* Persistent Workflow Top Bar Across Every Page */}
+      <WorkflowTopBar
+        workflows={workflows}
+        selectedWorkflowId={selectedWorkflowId}
+        onSelectWorkflow={setSelectedWorkflowId}
+        currentWorkflow={currentWorkflow}
+        agents={agents}
+        tools={tools}
+        hitlTickets={hitlTickets}
+        backlogCount={backlogCount}
+        wsConnected={wsConnected}
+        onNavigate={(panel, opts) => {
+          if (opts?.prefillPrompt) setHomePrefillPrompt(opts.prefillPrompt);
+          const targetMobile = panel === "home" ? "concierge" : panel;
+          setMobilePanel(targetMobile);
+          setDesktopFocus(panel);
+        }}
+        onOpenBacklog={() => setBacklogOpen(true)}
+        onRefresh={refreshAll}
+      />
+
       {/* Main Content Shell */}
       <main className="flex-1 max-w-[1600px] w-full mx-auto p-3 sm:p-5">
         {/* DESKTOP (lg+): Multi-Column Split View (Left: Workflow/BPMN, Center: Live Blackboard Feed, Right: HITL Drawer & Concierge Chat) */}
@@ -412,6 +435,7 @@ export default function App() {
                     setMobilePanel(panel);
                   }}
                   onRefresh={refreshAll}
+                  prefillPrompt={homePrefillPrompt}
                 />
               )}
               {desktopFocus === "board" && (
@@ -519,6 +543,7 @@ export default function App() {
               wsConnected={wsConnected}
               onNavigate={(panel) => setMobilePanel(panel)}
               onRefresh={refreshAll}
+              prefillPrompt={homePrefillPrompt}
             />
           )}
           {mobilePanel === "guide" && <UserGuide />}
