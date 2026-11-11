@@ -151,11 +151,15 @@ export default function ConciergeChat({
     e.preventDefault();
     if (!input.trim()) return;
     const userText = input.trim();
+    const historyPayload = messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setInput("");
     setLoading(true);
     try {
-      const res = await api.chatConcierge(userText, selectedWorkflowId);
+      const res = await api.chatConcierge(userText, selectedWorkflowId, historyPayload);
       setMessages((prev) => [
         ...prev,
         {

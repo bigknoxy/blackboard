@@ -1019,7 +1019,7 @@ async def list_blackboard_entries(
     stmt = select(BlackboardEntryModel).order_by(
         BlackboardEntryModel.created_at.desc()
     )
-    if workflow_id:
+    if workflow_id and workflow_id.lower() not in ("all", "none", "*", ""):
         stmt = stmt.where(BlackboardEntryModel.workflow_id == workflow_id)
     if entry_type:
         stmt = stmt.where(BlackboardEntryModel.entry_type == entry_type)

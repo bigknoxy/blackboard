@@ -17,8 +17,18 @@ import {
 } from "./constants/navigation";
 
 export default function App() {
-  const [mobilePanel, setMobilePanel] = useState("concierge"); // Defaults to Conversational Cockpit Home
-  const [desktopFocus, setDesktopFocus] = useState("home"); // Defaults to Conversational Cockpit Home
+  const getInitialPanel = (fallback) => {
+    if (typeof window !== "undefined") {
+      const p =
+        new URLSearchParams(window.location.search).get("panel") ||
+        (window.location.hash ? window.location.hash.replace("#", "") : null);
+      if (p) return p;
+    }
+    return fallback;
+  };
+
+  const [mobilePanel, setMobilePanel] = useState(() => getInitialPanel("concierge"));
+  const [desktopFocus, setDesktopFocus] = useState(() => getInitialPanel("home"));
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [workflows, setWorkflows] = useState([]);
@@ -54,7 +64,7 @@ export default function App() {
         api.listAgents(),
         api.listTools(),
         api.listWorkflows(),
-        api.listBlackboard(selectedWorkflowId),
+        api.listBlackboard("all"),
         api.listHitlTickets(),
         api.listBacklog ? api.listBacklog() : Promise.resolve([]),
       ]);
@@ -67,7 +77,7 @@ export default function App() {
     } catch (err) {
       console.warn("Initial fetch warning:", err.message);
     }
-  }, [selectedWorkflowId]);
+  }, []);
 
   useEffect(() => {
     refreshAll();
@@ -398,6 +408,8 @@ export default function App() {
                 <BlackboardFeed
                   entries={blackboardEntries}
                   selectedWorkflowId={selectedWorkflowId}
+                  onSelectWorkflow={setSelectedWorkflowId}
+                  workflows={workflows}
                   onRefresh={refreshAll}
                   liveEvents={liveEvents}
                 />
@@ -442,6 +454,8 @@ export default function App() {
                 <BlackboardFeed
                   entries={blackboardEntries}
                   selectedWorkflowId={selectedWorkflowId}
+                  onSelectWorkflow={setSelectedWorkflowId}
+                  workflows={workflows}
                   onRefresh={refreshAll}
                   liveEvents={liveEvents}
                 />
@@ -496,6 +510,8 @@ export default function App() {
             <BlackboardFeed
               entries={blackboardEntries}
               selectedWorkflowId={selectedWorkflowId}
+              onSelectWorkflow={setSelectedWorkflowId}
+              workflows={workflows}
               onRefresh={refreshAll}
               liveEvents={liveEvents}
             />

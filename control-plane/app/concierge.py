@@ -5,6 +5,7 @@ import math
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
@@ -1066,8 +1067,37 @@ class ConciergeAdminAgent:
         )
         if llm_reply:
             cleaned_reply, parsed_calls = self._sanitize_and_extract_tool_calls(llm_reply)
-            for pc in parsed_calls:
-                tool_calls_executed.append(pc)
+
+            # Multi-Turn ReAct Loop: Execute tools extracted from LLM and feed observations back for follow-up
+            unexecuted_calls = [
+                pc for pc in parsed_calls
+                if pc.get("tool") and not any(
+                    t.get("tool") == pc.get("tool") and t.get("status") in ("EXECUTED", "STORED", "RETRIEVED", "PENDING_APPROVAL")
+                    for t in tool_calls_executed
+                )
+            ]
+            if unexecuted_calls:
+                for pc in unexecuted_calls:
+                    tool_res = await self._execute_concierge_tool(
+                        session=session,
+                        tool_name=pc.get("tool"),
+                        args=pc.get("arguments", {}),
+                        workflow_id=req.workflow_id,
+                    )
+                    tool_calls_executed.append(tool_res)
+
+                # Second turn: synthesize observations into final response
+                second_reply = await self._try_ollama_chat(
+                    msg, state_snapshot, tool_calls_executed, history=req.history
+                )
+                if second_reply:
+                    sec_clean, _ = self._sanitize_and_extract_tool_calls(second_reply)
+                    if sec_clean and len(sec_clean.strip()) >= 20:
+                        cleaned_reply = sec_clean
+            else:
+                for pc in parsed_calls:
+                    if not any(t.get("tool") == pc.get("tool") for t in tool_calls_executed):
+                        tool_calls_executed.append(pc)
 
             has_architect_gap = any(t.get("tool") == "architect_tool_gap_analysis" for t in tool_calls_executed)
             has_capabilities = any(t.get("tool") == "describe_capabilities" for t in tool_calls_executed)
@@ -1104,6 +1134,117 @@ class ConciergeAdminAgent:
             tool_calls_executed=tool_calls_executed,
             state_snapshot=state_snapshot,
         )
+
+    async def _execute_concierge_tool(
+        self,
+        session: AsyncSession,
+        tool_name: str,
+        args: Dict[str, Any],
+        workflow_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute a tool called by the Concierge agent or LLM ReAct loop."""
+        from app.mcp_gateway import mcp_gateway, ToolInvokeRequest
+        wf_id = workflow_id or "code_review_pipeline"
+
+        if tool_name == "web_search":
+            query = args.get("query") or args.get("q") or ""
+            res = await mcp_gateway.invoke_tool(
+                session=session,
+                req=ToolInvokeRequest(
+                    agent_id="concierge-admin",
+                    workflow_id=wf_id,
+                    task_id=f"concierge-search-{uuid.uuid4().hex[:8]}",
+                    tool_id="web_search",
+                    arguments={"query": str(query)[:100], "num_results": 3},
+                    bypass_approval=True,
+                ),
+            )
+            return {
+                "tool": "web_search",
+                "query": query,
+                "status": res.status,
+                "results": (res.result or {}).get("results", []),
+            }
+        elif tool_name == "weather_lookup":
+            loc = args.get("location") or args.get("loc") or "Topeka, KS"
+            res = await mcp_gateway.invoke_tool(
+                session=session,
+                req=ToolInvokeRequest(
+                    agent_id="concierge-admin",
+                    workflow_id=wf_id,
+                    task_id=f"concierge-weather-{uuid.uuid4().hex[:8]}",
+                    tool_id="weather_lookup",
+                    arguments={"location": loc},
+                    bypass_approval=True,
+                ),
+            )
+            return {
+                "tool": "weather_lookup",
+                "location": loc,
+                "status": res.status,
+                "result": res.result,
+            }
+        elif tool_name == "bash_executor":
+            cmd = args.get("command") or args.get("cmd") or ""
+            res = await mcp_gateway.invoke_tool(
+                session=session,
+                req=ToolInvokeRequest(
+                    agent_id="concierge-admin",
+                    workflow_id=wf_id,
+                    task_id=f"concierge-bash-{uuid.uuid4().hex[:8]}",
+                    tool_id="bash_executor",
+                    arguments={"command": cmd},
+                    bypass_approval=False,
+                ),
+            )
+            return {
+                "tool": "bash_executor",
+                "command": cmd,
+                "status": res.status,
+                "result": res.result,
+                "ticket_id": res.ticket_id,
+            }
+        elif tool_name == "list_memories":
+            all_mems_res = await session.execute(
+                select(AgentMemoryModel).order_by(AgentMemoryModel.created_at.desc()).limit(25)
+            )
+            all_mems = all_mems_res.scalars().all()
+            breakdown: Dict[str, List[str]] = {}
+            for m in all_mems:
+                breakdown.setdefault(m.agent_id, []).append(m.content[:140])
+            return {
+                "tool": "list_memories",
+                "count": len(all_mems),
+                "agents": list(breakdown.keys()),
+                "status": "RETRIEVED",
+                "breakdown": breakdown,
+            }
+        else:
+            # Generic MCP tool invocation
+            t_model = await session.get(MCPToolModel, tool_name)
+            if t_model:
+                res = await mcp_gateway.invoke_tool(
+                    session=session,
+                    req=ToolInvokeRequest(
+                        agent_id="concierge-admin",
+                        workflow_id=wf_id,
+                        task_id=f"concierge-mcp-{uuid.uuid4().hex[:8]}",
+                        tool_id=tool_name,
+                        arguments=args,
+                        bypass_approval=False,
+                    ),
+                )
+                return {
+                    "tool": tool_name,
+                    "status": res.status,
+                    "result": res.result,
+                    "ticket_id": res.ticket_id,
+                }
+            return {
+                "tool": tool_name,
+                "status": "NOT_FOUND",
+                "message": f"Tool '{tool_name}' is not registered in MCP gateway.",
+            }
 
     async def _build_state_snapshot(
         self, session: AsyncSession, workflow_id: Optional[str] = None

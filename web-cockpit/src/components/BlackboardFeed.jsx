@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import BlackboardGraphCanvas from "./BlackboardGraphCanvas";
 
@@ -24,18 +24,40 @@ const FILTER_TAGS = [
 
 const PAGE_SIZE = 20;
 
+/**
+ * Human-readable relative time formatter (e.g. "just now", "15s ago", "2m ago", "1h ago", "2d ago")
+ */
+export function formatRelativeTime(dateString, nowTimestamp = Date.now()) {
+  if (!dateString) return "just now";
+  const then = new Date(dateString).getTime();
+  if (isNaN(then) || then === 0) return "just now";
+  const diffSec = Math.max(0, Math.floor((nowTimestamp - then) / 1000));
+  if (diffSec < 10) return "just now";
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour}h ago`;
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 30) return `${diffDay}d ago`;
+  const diffMonth = Math.floor(diffDay / 30);
+  if (diffMonth < 12) return `${diffMonth}mo ago`;
+  return `${Math.floor(diffMonth / 12)}y ago`;
+}
+
 export default function BlackboardFeed({
   entries = [],
   selectedWorkflowId,
+  onSelectWorkflow,
+  workflows = [],
   onRefresh,
   liveEvents = [],
 }) {
   const [steeringText, setSteeringText] = useState("");
   const [filterType, setFilterType] = useState("ALL");
+  const [workflowFilter, setWorkflowFilter] = useState("ALL"); // Default: Entire view across all workflows
   const [page, setPage] = useState(1);
   const [expandedIds, setExpandedIds] = useState({});
-  // Track explicit operator clicks: id -> boolean (true = explicitly expanded, false = explicitly collapsed)
-  // When an id is not in userToggledCards, it defaults to COLLAPSED unless in_progress
   const [userToggledCards, setUserToggledCards] = useState({});
   const [expandedContentIds, setExpandedContentIds] = useState({});
   const [showSteeringInput, setShowSteeringInput] = useState(false);
@@ -44,16 +66,53 @@ export default function BlackboardFeed({
   const [submitting, setSubmitting] = useState(false);
   const [pruning, setPruning] = useState(false);
   const [activeTab, setActiveTab] = useState("feed"); // "feed" | "dag_graph"
+  const [now, setNow] = useState(() => Date.now());
 
-  const filteredEntries = useMemo(
-    () =>
-      entries.filter((item) =>
-        filterType === "ALL" ? true : item.entry_type === filterType
-      ),
-    [entries, filterType]
-  );
+  // Dynamic 15s interval tick so relative timestamps ("5s ago", "1m ago") update live without reload
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(timer);
+  }, []);
 
-  // Paginated / virtualized window so mobile browsers never drop frames on 50+ events
+  // Compute entry count per workflow for badge chips
+  const workflowStats = useMemo(() => {
+    const counts = {};
+    for (const e of entries) {
+      const wId = e.workflow_id || "unassigned";
+      counts[wId] = (counts[wId] || 0) + 1;
+    }
+    return counts;
+  }, [entries]);
+
+  // Combined list of workflow options (All + known from entries + known from registered workflows)
+  const availableWorkflows = useMemo(() => {
+    const set = new Set();
+    workflows.forEach((w) => w.id && set.add(w.id));
+    entries.forEach((e) => e.workflow_id && set.add(e.workflow_id));
+    return Array.from(set);
+  }, [workflows, entries]);
+
+  // Sort entries reverse-chronologically (most recent at the top)
+  const sortedEntries = useMemo(() => {
+    return [...entries].sort((a, b) => {
+      const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return timeB - timeA;
+    });
+  }, [entries]);
+
+  // Filter by both entry type and workflow (defaults to entire view when workflowFilter === "ALL")
+  const filteredEntries = useMemo(() => {
+    return sortedEntries.filter((item) => {
+      const matchesType =
+        filterType === "ALL" ? true : item.entry_type === filterType;
+      const matchesWf =
+        workflowFilter === "ALL" ? true : item.workflow_id === workflowFilter;
+      return matchesType && matchesWf;
+    });
+  }, [sortedEntries, filterType, workflowFilter]);
+
+  // Paginated window for optimal mobile frame rates
   const totalPages = Math.max(1, Math.ceil(filteredEntries.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages);
   const visibleEntries = useMemo(() => {
@@ -131,7 +190,7 @@ export default function BlackboardFeed({
   function handleCollapseAll() {
     const all = {};
     visibleEntries.forEach((e) => {
-      all[e.id] = false; // explicitly collapsed
+      all[e.id] = false;
     });
     setUserToggledCards(all);
   }
@@ -140,7 +199,7 @@ export default function BlackboardFeed({
     const all = {};
     const allContent = {};
     visibleEntries.forEach((e) => {
-      all[e.id] = true; // explicitly expanded
+      all[e.id] = true;
       allContent[e.id] = true;
     });
     setUserToggledCards(all);
@@ -164,8 +223,12 @@ export default function BlackboardFeed({
     if (!steeringText.trim()) return;
     setSubmitting(true);
     try {
+      const targetWf =
+        workflowFilter !== "ALL"
+          ? workflowFilter
+          : selectedWorkflowId || "code_review_pipeline";
       await api.postSteering({
-        workflow_id: selectedWorkflowId || "code_review_pipeline",
+        workflow_id: targetWf,
         content: steeringText.trim(),
       });
       setSteeringText("");
@@ -178,28 +241,41 @@ export default function BlackboardFeed({
   async function handlePruneDebate() {
     setPruning(true);
     try {
-      await api.pruneBlackboard(
-        selectedWorkflowId || "code_review_pipeline",
-        3,
-        2
-      );
+      const targetWf =
+        workflowFilter !== "ALL"
+          ? workflowFilter
+          : selectedWorkflowId || "code_review_pipeline";
+      await api.pruneBlackboard(targetWf, 3, 2);
       if (onRefresh) await onRefresh();
     } finally {
       setPruning(false);
     }
   }
 
+  function handleSelectWorkflowPill(wfId) {
+    setWorkflowFilter(wfId);
+    setPage(1);
+    if (onSelectWorkflow && wfId !== "ALL") {
+      onSelectWorkflow(wfId);
+    }
+  }
+
   return (
     <div className="space-y-4 w-full max-w-full overflow-x-hidden">
       <div className="flex flex-col bg-slate-900/95 border border-slate-800 rounded-xl p-3 sm:p-5 shadow-lg">
-        {/* Header & Janitor Prune Action */}
+        {/* Header & Controls */}
         <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
           <div>
-            <h2 className="text-base sm:text-lg font-semibold text-white">
-              Live Blackboard Feed ({filteredEntries.length})
-            </h2>
-            <p className="text-xs text-slate-400">
-              Touch-friendly artifact cards with windowed rendering
+            <div className="flex items-center gap-2">
+              <h2 className="text-base sm:text-lg font-semibold text-white">
+                Live Blackboard Feed
+              </h2>
+              <span className="px-2 py-0.5 rounded-full text-xs font-mono font-medium bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                {filteredEntries.length} {workflowFilter === "ALL" ? "Total" : workflowFilter}
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Full board view · newest at top · live relative timestamps
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -247,11 +323,75 @@ export default function BlackboardFeed({
 
         {activeTab === "dag_graph" ? (
           <div className="mt-4">
-            <BlackboardGraphCanvas workflowId={selectedWorkflowId} />
+            <BlackboardGraphCanvas
+              workflowId={workflowFilter !== "ALL" ? workflowFilter : selectedWorkflowId}
+            />
           </div>
         ) : (
           <>
-            {/* Toolbar: Sticky Filter Tag Bar + Collapse All/Expand All Controls */}
+            {/* 1. Workflow Filter Carousel (Defaults to "All Workflows" for unconstrained overview) */}
+            <div className="pt-3 pb-2 border-b border-slate-800/60">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <span>🌐</span>
+                  <span>Pipeline Scope:</span>
+                </span>
+                {workflowFilter !== "ALL" && (
+                  <button
+                    type="button"
+                    onClick={() => handleSelectWorkflowPill("ALL")}
+                    className="text-[11px] text-indigo-400 hover:text-indigo-300 underline font-medium"
+                  >
+                    Reset to All Workflows
+                  </button>
+                )}
+              </div>
+              <div
+                role="group"
+                aria-label="Workflow Scope Filter"
+                className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5"
+              >
+                <button
+                  type="button"
+                  data-testid="filter-workflow-all"
+                  onClick={() => handleSelectWorkflowPill("ALL")}
+                  className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-medium border transition shrink-0 flex items-center gap-1.5 ${
+                    workflowFilter === "ALL"
+                      ? "bg-indigo-600 text-white border-indigo-500 shadow-sm"
+                      : "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-white"
+                  }`}
+                >
+                  <span>🌐 All Workflows</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-black/30 font-mono">
+                    {entries.length}
+                  </span>
+                </button>
+                {availableWorkflows.map((wfId) => {
+                  const active = workflowFilter === wfId;
+                  const count = workflowStats[wfId] || 0;
+                  return (
+                    <button
+                      key={wfId}
+                      type="button"
+                      data-testid={`filter-workflow-${wfId}`}
+                      onClick={() => handleSelectWorkflowPill(wfId)}
+                      className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-medium border transition shrink-0 flex items-center gap-1.5 ${
+                        active
+                          ? "bg-indigo-600 text-white border-indigo-500 shadow-sm"
+                          : "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700 hover:text-white"
+                      }`}
+                    >
+                      <span className="font-mono">{wfId}</span>
+                      <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-black/30 font-mono">
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 2. Sticky Entry Type Filter Tag Bar + Collapse All/Expand All Controls */}
             <div
               role="toolbar"
               aria-label="Filter Blackboard Artifacts"
@@ -303,7 +443,7 @@ export default function BlackboardFeed({
               </div>
             </div>
 
-            {/* Operator Steering Injection Bar (Collapsible to save mobile space) */}
+            {/* Operator Steering Injection Bar */}
             <div className="mt-3">
               <div className="flex items-center justify-between">
                 <button
@@ -355,14 +495,16 @@ export default function BlackboardFeed({
                   const isExpandedMeta = Boolean(expandedIds[entry.id]);
                   const isContentExpanded = Boolean(expandedContentIds[entry.id]);
                   const userChoice = userToggledCards[entry.id];
-                  // Defaults to COLLAPSED unless in progress.
-                  // Once not in progress, only expanded if explicitly opened by user ("looking into it").
                   const isCardExpanded =
                     userChoice !== undefined ? userChoice : inProgress;
                   const isCardCollapsed = !isCardExpanded;
                   const lines = entry.content ? entry.content.split("\n") : [];
                   const isLongContent =
                     lines.length > 4 || (entry.content && entry.content.length > 220);
+                  const relTime = formatRelativeTime(entry.created_at, now);
+                  const fullDateStr = entry.created_at
+                    ? new Date(entry.created_at).toLocaleString()
+                    : "";
 
                   // 1. Sleek 1-line collapsed summary chip
                   if (isCardCollapsed) {
@@ -373,7 +515,7 @@ export default function BlackboardFeed({
                         className="p-2.5 sm:p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 hover:border-slate-700 transition flex items-center justify-between gap-2 cursor-pointer w-full"
                         onClick={() => toggleCardCollapse(entry.id, false)}
                       >
-                        <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1 overflow-hidden">
                           <span
                             className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border shrink-0 ${badgeClass}`}
                           >
@@ -382,6 +524,11 @@ export default function BlackboardFeed({
                           <span className="text-xs font-semibold text-indigo-300 shrink-0">
                             @{entry.agent_id}
                           </span>
+                          {entry.workflow_id && (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 shrink-0 max-w-[120px] truncate hidden xs:inline">
+                              {entry.workflow_id}
+                            </span>
+                          )}
                           {inProgress && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 shrink-0">
                               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -392,11 +539,13 @@ export default function BlackboardFeed({
                             {lines[0] || "(empty payload)"}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0 ml-auto">
-                          <span className="text-[11px] text-slate-500 hidden sm:inline font-mono">
-                            {entry.created_at
-                              ? new Date(entry.created_at).toLocaleTimeString()
-                              : ""}
+                        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 ml-auto">
+                          <span
+                            title={fullDateStr}
+                            className="inline-flex items-center gap-1 text-[11px] text-slate-400 font-mono bg-slate-900/90 px-2 py-0.5 rounded border border-slate-800 shrink-0"
+                          >
+                            <span className="text-[10px] text-indigo-400">🕒</span>
+                            <span>{relTime}</span>
                           </span>
                           <button
                             type="button"
@@ -422,9 +571,9 @@ export default function BlackboardFeed({
                       data-testid="blackboard-entry-card"
                       className="p-3.5 sm:p-4 rounded-xl bg-slate-950/90 border border-slate-800 hover:border-slate-700 transition"
                     >
-                      {/* Consistent Header with Fixed Top-Right Caret Button */}
+                      {/* Consistent Header with Fixed Top-Right Caret Button & Relative Time */}
                       <div className="flex items-center justify-between gap-2 mb-2.5 w-full">
-                        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1 overflow-hidden">
+                        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1 overflow-hidden flex-wrap">
                           <span
                             className={`text-[10px] sm:text-[11px] font-mono uppercase px-2 py-0.5 rounded border shrink-0 ${badgeClass}`}
                           >
@@ -433,6 +582,11 @@ export default function BlackboardFeed({
                           <span className="text-xs font-semibold text-indigo-300 shrink-0">
                             @{entry.agent_id}
                           </span>
+                          {entry.workflow_id && (
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 shrink-0 truncate max-w-[140px]">
+                              {entry.workflow_id}
+                            </span>
+                          )}
                           {inProgress && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-300 border border-amber-500/30 shrink-0">
                               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -440,16 +594,18 @@ export default function BlackboardFeed({
                             </span>
                           )}
                           {entry.task_id && (
-                            <span className="text-[11px] text-slate-500 font-mono truncate">
+                            <span className="text-[11px] text-slate-500 font-mono truncate hidden sm:inline">
                               {entry.task_id}
                             </span>
                           )}
                         </div>
-                        <div className="flex items-center gap-2 shrink-0 ml-auto">
-                          <span className="text-[11px] text-slate-500 hidden sm:inline font-mono">
-                            {entry.created_at
-                              ? new Date(entry.created_at).toLocaleTimeString()
-                              : ""}
+                        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 ml-auto">
+                          <span
+                            title={fullDateStr}
+                            className="inline-flex items-center gap-1 text-[11px] text-slate-400 font-mono bg-slate-900/90 px-2 py-0.5 rounded border border-slate-800 shrink-0"
+                          >
+                            <span className="text-[10px] text-indigo-400">🕒</span>
+                            <span>{relTime}</span>
                           </span>
                           <button
                             type="button"
@@ -534,7 +690,10 @@ export default function BlackboardFeed({
                           <div>Workflow: {entry.workflow_id}</div>
                           <div>Agent: @{entry.agent_id}</div>
                           <div>
-                            Metadata: {JSON.stringify(entry.metadata || {})}
+                            Created: {fullDateStr} ({relTime})
+                          </div>
+                          <div>
+                            Metadata: {JSON.stringify(entry.metadata_ || entry.metadata || {})}
                           </div>
                         </div>
                       )}
@@ -544,32 +703,32 @@ export default function BlackboardFeed({
               )}
             </div>
 
-        {/* Pagination / Virtual Window Controls for 50+ Event Streams */}
-        {filteredEntries.length > PAGE_SIZE && (
-          <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
-            <button
-              type="button"
-              data-testid="pagination-prev-btn"
-              disabled={currentPage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-lg bg-slate-800 disabled:opacity-40 text-xs font-semibold text-slate-200"
-            >
-              Previous
-            </button>
-            <span className="text-xs text-slate-400 font-mono">
-              Page {currentPage} of {totalPages} ({filteredEntries.length} items)
-            </span>
-            <button
-              type="button"
-              data-testid="pagination-next-btn"
-              disabled={currentPage >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-lg bg-indigo-600 disabled:opacity-40 text-xs font-semibold text-white"
-            >
-              Next Window
-            </button>
-          </div>
-        )}
+            {/* Pagination / Virtual Window Controls for 50+ Event Streams */}
+            {filteredEntries.length > PAGE_SIZE && (
+              <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  data-testid="pagination-prev-btn"
+                  disabled={currentPage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-lg bg-slate-800 disabled:opacity-40 text-xs font-semibold text-slate-200"
+                >
+                  Previous
+                </button>
+                <span className="text-xs text-slate-400 font-mono">
+                  Page {currentPage} of {totalPages} ({filteredEntries.length} items)
+                </span>
+                <button
+                  type="button"
+                  data-testid="pagination-next-btn"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  className="min-h-[44px] min-w-[44px] px-4 py-2 rounded-lg bg-indigo-600 disabled:opacity-40 text-xs font-semibold text-white"
+                >
+                  Next Window
+                </button>
+              </div>
+            )}
           </>
         )}
       </div>
