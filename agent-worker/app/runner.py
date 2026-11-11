@@ -69,6 +69,7 @@ class StatelessAgentRunner:
     ) -> None:
         self.worker_id = worker_id
         self.redis = redis_client
+        self._tools_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 
     async def execute_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = task["task_id"]
@@ -284,11 +285,18 @@ class StatelessAgentRunner:
     async def _fetch_agent_tools(
         self, client: httpx.AsyncClient, agent_id: str
     ) -> List[Dict[str, Any]]:
+        now = time.time()
+        cached = self._tools_cache.get(agent_id)
+        if cached and (now - cached[0]) < 30.0:
+            return cached[1]
+
         resp = await client.get(
             f"{CONTROL_PLANE_URL}/api/v1/agents/{agent_id}/tools"
         )
         if resp.status_code == 200:
-            return resp.json()
+            tools = resp.json()
+            self._tools_cache[agent_id] = (now, tools)
+            return tools
         return []
 
     async def _fetch_blackboard_context(

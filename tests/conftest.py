@@ -13,6 +13,7 @@ for candidate_root in [
     ROOT_DIR,
     ROOT_DIR / "control-plane",
     ROOT_DIR / "agent-worker",
+    ROOT_DIR / "agent_worker_app",
 ]:
     if candidate_root.exists():
         sys.path.insert(0, str(candidate_root))
@@ -22,6 +23,7 @@ import app as _shared_app_pkg  # noqa: E402
 for sub_app in [
     ROOT_DIR / "control-plane" / "app",
     ROOT_DIR / "agent-worker" / "app",
+    ROOT_DIR / "agent_worker_app",
     ROOT_DIR / "app",
 ]:
     if sub_app.exists() and str(sub_app) not in _shared_app_pkg.__path__:
@@ -73,6 +75,15 @@ class InMemoryAsyncRedis:
 
     async def setex(self, key: str, ttl: float, value: str) -> bool:
         return await self.set(key, value, nx=False, ex=ttl)
+
+    async def expire(self, key: str, ttl: float) -> bool:
+        async with self._lock:
+            self._purge_expired(key)
+            if key in self._kv:
+                val, _ = self._kv[key]
+                self._kv[key] = (val, time.monotonic() + ttl)
+                return True
+            return False
 
     async def get(self, key: str) -> Optional[str]:
         async with self._lock:

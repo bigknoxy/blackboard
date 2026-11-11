@@ -4,11 +4,29 @@ import logging
 import math
 import os
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Module-Level Precompiled Regexes for Fast Token / XML / Intent Parsing
+RE_TOOL_CALL_BLOCKS = re.compile(r"<tool_call>([\s\S]*?)</tool_call>", re.IGNORECASE)
+RE_TOOL_NAME = re.compile(r"^([a-zA-Z0-9_\-]+)")
+RE_ARG_KEY_VAL = re.compile(r"<arg_key>([\s\S]*?)</arg_key>\s*<arg_value>([\s\S]*?)</arg_value>", re.IGNORECASE)
+RE_STRIP_TOOL_CALLS = re.compile(r"<tool_call>[\s\S]*?</tool_call>", re.IGNORECASE)
+RE_STRIP_TAGS = re.compile(r"</?(?:tool_call|arg_key|arg_value|function_call|tool)[^>]*>", re.IGNORECASE)
+RE_MULTI_NEWLINES = re.compile(r"\n{3,}")
+RE_NAMED_TOOL = re.compile(r"(?:named|called)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", re.IGNORECASE)
+RE_QUOTED_TOOL = re.compile(r"(?:tool|skill)\s+['\"]([a-zA-Z0-9_\-]+)['\"]", re.IGNORECASE)
+RE_WORD_TOOL = re.compile(r"(?:tool|skill)\s+([a-zA-Z0-9_\-]+)", re.IGNORECASE)
+RE_DESC = re.compile(r"description\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
+RE_CMD = re.compile(r"(?:command|using command|running|runs)\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
+RE_STEP = re.compile(r"(?:step|stage|node)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", re.IGNORECASE)
+RE_TOOL_FOR = re.compile(r"(?:tool|for)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", re.IGNORECASE)
+RE_PATTERN = re.compile(r"(?:pattern|with|starting with)\s+['\"]?([^'\"\n]+)['\"]?", re.IGNORECASE)
+RE_LOCATION = re.compile(r"(?:in|for|at|around)\s+([a-zA-Z0-9\s,]+?)(?:\s+right now|\s+today|\s+currently|\?|$)", re.IGNORECASE)
 
 from app.models import (
     AgentMemoryModel,
@@ -160,6 +178,13 @@ class ConciergeAdminAgent:
             "description": "Create, list, or revoke permanent auto-approval policies for tools, command patterns, or workflow steps.",
         },
     ]
+
+    def __init__(self) -> None:
+        self._state_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+    def invalidate_state_cache(self) -> None:
+        """Atomic invalidation of in-memory state snapshot cache."""
+        self._state_cache.clear()
 
     async def handle_chat(
         self, session: AsyncSession, req: ConciergeChatRequest
@@ -1012,6 +1037,14 @@ class ConciergeAdminAgent:
                 "result": bash_resp.result,
             })
 
+        mutating_tools = {
+            "upsert_agent", "store_memory", "capture_idea", "inject_steering",
+            "create_dynamic_tool", "dynamic_workflow_architect", "trigger_workflow",
+            "manage_approval_policy", "assign_tool_to_agent"
+        }
+        if any(tc.get("tool") in mutating_tools for tc in tool_calls_executed):
+            self.invalidate_state_cache()
+
         state_snapshot = await self._build_state_snapshot(
             session, req.workflow_id
         )
@@ -1075,6 +1108,12 @@ class ConciergeAdminAgent:
     async def _build_state_snapshot(
         self, session: AsyncSession, workflow_id: Optional[str] = None
     ) -> Dict[str, Any]:
+        cache_key = workflow_id or "__all__"
+        now = time.time()
+        cached = self._state_cache.get(cache_key)
+        if cached and (now - cached[0]) < 10.0:
+            return cached[1]
+
         agents_res = await session.execute(select(AgentModel))
         agents = [
             {
@@ -1147,7 +1186,7 @@ class ConciergeAdminAgent:
         op_tz = await r.get("operator:timezone")
         op_loc = await r.get("operator:location")
 
-        return {
+        snapshot = {
             "agents": agents,
             "tools": tools,
             "workflows": workflows,
@@ -1157,6 +1196,8 @@ class ConciergeAdminAgent:
             "operator_timezone": op_tz,
             "operator_location": op_loc,
         }
+        self._state_cache[cache_key] = (now, snapshot)
+        return snapshot
 
     @staticmethod
     def _sanitize_and_extract_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -1166,8 +1207,8 @@ class ConciergeAdminAgent:
         extracted_calls: List[Dict[str, Any]] = []
         cleaned = text
 
-        # Pattern: <tool_call>...</tool_call>
-        tool_call_blocks = re.findall(r"<tool_call>([\s\S]*?)</tool_call>", text, re.IGNORECASE)
+        # Pattern: <tool_call>...</tool_call> via precompiled regex
+        tool_call_blocks = RE_TOOL_CALL_BLOCKS.findall(text)
         for block in tool_call_blocks:
             block_content = block.strip()
             # Try JSON format first
@@ -1180,16 +1221,12 @@ class ConciergeAdminAgent:
                 except Exception:
                     pass
 
-            # XML arg_key / arg_value parsing
-            tool_name_match = re.match(r"^([a-zA-Z0-9_\-]+)", block_content)
+            # XML arg_key / arg_value parsing via precompiled regex
+            tool_name_match = RE_TOOL_NAME.match(block_content)
             tool_name = tool_name_match.group(1) if tool_name_match else "unknown_tool"
 
             args: Dict[str, Any] = {}
-            arg_matches = re.findall(
-                r"<arg_key>([\s\S]*?)</arg_key>\s*<arg_value>([\s\S]*?)</arg_value>",
-                block_content,
-                re.IGNORECASE,
-            )
+            arg_matches = RE_ARG_KEY_VAL.findall(block_content)
             for k, v in arg_matches:
                 args[k.strip()] = v.strip()
 
@@ -1199,12 +1236,12 @@ class ConciergeAdminAgent:
                 "extracted_from_llm": True,
             })
 
-        # Strip all <tool_call>...</tool_call>
-        cleaned = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", cleaned, flags=re.IGNORECASE)
-        # Strip all dangling XML tags related to tool execution
-        cleaned = re.sub(r"</?(?:tool_call|arg_key|arg_value|function_call|tool)[^>]*>", "", cleaned, flags=re.IGNORECASE)
-        # Clean up excess whitespace and empty lines
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        # Strip all <tool_call>...</tool_call> via precompiled regex
+        cleaned = RE_STRIP_TOOL_CALLS.sub("", cleaned)
+        # Strip all dangling XML tags related to tool execution via precompiled regex
+        cleaned = RE_STRIP_TAGS.sub("", cleaned)
+        # Clean up excess whitespace and empty lines via precompiled regex
+        cleaned = RE_MULTI_NEWLINES.sub("\n\n", cleaned).strip()
 
         return cleaned, extracted_calls
 

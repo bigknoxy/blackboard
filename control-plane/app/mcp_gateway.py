@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 import os
 import re
+import signal
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import httpx
@@ -542,10 +544,9 @@ class MCPToolboxGateway:
             "message": f"Workflow '{wf_id}' is activated and ready for execution.",
         }
 
-    def _handle_bash_executor(
+    async def _handle_bash_executor(
         self, args: Dict[str, Any]
     ) -> Dict[str, Any]:
-        import subprocess
         cmd = str(args.get("command", "")).strip()
         timeout = min(int(args.get("timeout", 15)), 60)
         if not cmd:
@@ -557,30 +558,46 @@ class MCPToolboxGateway:
                 "status": "FAILED",
             }
         try:
-            res = subprocess.run(
+            # Create subprocess in its own process group (start_new_session=True)
+            # so timeouts can kill all descendant child processes cleanly without leaving zombies.
+            proc = await asyncio.create_subprocess_shell(
                 cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            return {
-                "tool": "bash_executor",
-                "command": cmd,
-                "exit_code": res.returncode,
-                "stdout": res.stdout,
-                "stderr": res.stderr,
-                "status": "SUCCESS" if res.returncode == 0 else "FAILED",
-            }
-        except subprocess.TimeoutExpired:
-            return {
-                "tool": "bash_executor",
-                "command": cmd,
-                "exit_code": 124,
-                "stdout": "",
-                "stderr": f"Command timed out after {timeout} seconds",
-                "status": "TIMEOUT",
-            }
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+                stdout = stdout_b.decode("utf-8", errors="replace")
+                stderr = stderr_b.decode("utf-8", errors="replace")
+                return {
+                    "tool": "bash_executor",
+                    "command": cmd,
+                    "exit_code": proc.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "status": "SUCCESS" if proc.returncode == 0 else "FAILED",
+                }
+            except asyncio.TimeoutError:
+                # Preemptive zombie reaping: kill the entire process group
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+                return {
+                    "tool": "bash_executor",
+                    "command": cmd,
+                    "exit_code": 124,
+                    "stdout": "",
+                    "stderr": f"Command timed out after {timeout} seconds (process group reaped)",
+                    "status": "TIMEOUT",
+                }
         except Exception as exc:
             return {
                 "tool": "bash_executor",
@@ -1220,28 +1237,50 @@ class MCPToolboxGateway:
         if tool.transport == "builtin" or tool.id in self._builtin_handlers:
             handler = self._builtin_handlers.get(tool.id)
             if handler:
-                return handler(arguments)
+                if asyncio.iscoroutinefunction(handler):
+                    return await handler(arguments)
+                return await asyncio.to_thread(handler, arguments)
             cfg = tool.endpoint_config or {}
             if cfg.get("bash_command") or cfg.get("command"):
                 cmd = str(cfg.get("bash_command") or cfg.get("command"))
                 for k, v in arguments.items():
                     cmd = cmd.replace(f"{{{k}}}", str(v))
-                import subprocess
                 try:
-                    proc = subprocess.run(
-                        ["/bin/bash", "-c", cmd],
-                        capture_output=True,
-                        text=True,
-                        timeout=15,
+                    proc = await asyncio.create_subprocess_shell(
+                        cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
                     )
-                    return {
-                        "tool": tool.id,
-                        "command": cmd,
-                        "exit_code": proc.returncode,
-                        "stdout": proc.stdout.strip(),
-                        "stderr": proc.stderr.strip(),
-                        "status": "EXECUTED" if proc.returncode == 0 else "ERROR",
-                    }
+                    try:
+                        stdout_b, stderr_b = await asyncio.wait_for(
+                            proc.communicate(), timeout=15
+                        )
+                        return {
+                            "tool": tool.id,
+                            "command": cmd,
+                            "exit_code": proc.returncode,
+                            "stdout": stdout_b.decode("utf-8", errors="replace").strip(),
+                            "stderr": stderr_b.decode("utf-8", errors="replace").strip(),
+                            "status": "EXECUTED" if proc.returncode == 0 else "ERROR",
+                        }
+                    except asyncio.TimeoutError:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                        try:
+                            await proc.wait()
+                        except Exception:
+                            pass
+                        return {
+                            "tool": tool.id,
+                            "command": cmd,
+                            "exit_code": 124,
+                            "stdout": "",
+                            "stderr": "Command timed out after 15 seconds (process group reaped)",
+                            "status": "TIMEOUT",
+                        }
                 except Exception as exc:
                     return {"tool": tool.id, "status": "ERROR", "error": str(exc)}
             return {

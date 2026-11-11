@@ -527,6 +527,14 @@ class ChannelGateway:
     def __init__(self):
         self.telegram = TelegramChannel()
         self.discord = DiscordChannel()
+        self._polling_running = True
+        self._polling_task: Optional[asyncio.Task] = None
+
+    def stop_telegram_polling(self) -> None:
+        """Signal background polling loop to terminate immediately without waiting on long-poll."""
+        self._polling_running = False
+        if self._polling_task and not self._polling_task.done():
+            self._polling_task.cancel()
 
     async def get_status(self) -> Dict[str, Any]:
         tg = await self.telegram.get_credentials()
@@ -842,38 +850,49 @@ class ChannelGateway:
             except Exception as e:
                 logger.warning("Could not sync Telegram credentials from environment: %s", e)
 
-        while True:
-            try:
-                creds = await self.telegram.get_credentials()
-                token = creds["token"]
-                enabled = creds["enabled"]
+        self._polling_running = True
+        self._polling_task = asyncio.current_task()
+        try:
+            async with httpx.AsyncClient(timeout=35.0) as client:
+                while self._polling_running:
+                    try:
+                        creds = await self.telegram.get_credentials()
+                        token = creds["token"]
+                        enabled = creds["enabled"]
 
-                # Skip polling if not configured, disabled, or using a test mock token
-                if not token or not enabled or token.startswith("mock-"):
-                    await asyncio.sleep(4)
-                    continue
+                        # Skip polling if not configured, disabled, or using a test mock token
+                        if not token or not enabled or token.startswith("mock-"):
+                            # Responsive sleep check so stop_telegram_polling exits immediately
+                            for _ in range(10):
+                                if not self._polling_running:
+                                    break
+                                await asyncio.sleep(0.1)
+                            continue
 
-                async with httpx.AsyncClient(timeout=35.0) as client:
-                    resp = await client.get(
-                        f"https://api.telegram.org/bot{token}/getUpdates",
-                        params={"offset": last_offset, "timeout": 20},
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        updates = data.get("result", [])
-                        for update in updates:
-                            update_id = update.get("update_id", 0)
-                            last_offset = max(last_offset, update_id + 1)
-                            logger.info("Processing inbound Telegram update: update_id=%s", update_id)
-                            asyncio.create_task(self._process_single_telegram_update(update))
-                    else:
-                        await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                logger.info("Telegram background polling stopped.")
-                break
-            except Exception as exc:
-                logger.debug("Telegram polling transient exception: %s", exc)
-                await asyncio.sleep(5)
+                        resp = await client.get(
+                            f"https://api.telegram.org/bot{token}/getUpdates",
+                            params={"offset": last_offset, "timeout": 20},
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            updates = data.get("result", [])
+                            for update in updates:
+                                update_id = update.get("update_id", 0)
+                                last_offset = max(last_offset, update_id + 1)
+                                logger.info("Processing inbound Telegram update: update_id=%s", update_id)
+                                asyncio.create_task(self._process_single_telegram_update(update))
+                        else:
+                            await asyncio.sleep(2)
+                    except asyncio.CancelledError:
+                        logger.info("Telegram background polling cancelled.")
+                        break
+                    except Exception as exc:
+                        logger.debug("Telegram polling transient exception: %s", exc)
+                        await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            logger.info("Telegram background polling stopped cleanly.")
 
     async def _process_single_telegram_update(self, update: Dict[str, Any]) -> None:
         async with AsyncSessionLocal() as session:
