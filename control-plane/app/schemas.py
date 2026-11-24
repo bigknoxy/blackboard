@@ -226,6 +226,7 @@ class WorkflowNode(BaseModel):
         "StartEvent",
         "EndEvent",
         "ServiceTask",
+        "VerificationTask",
         "ParallelGateway",
         "ExclusiveGateway",
         "UserTask",
@@ -234,6 +235,8 @@ class WorkflowNode(BaseModel):
     entry_type: Optional[EntryTypeLiteral] = "spec"
     prompt_template: Optional[str] = None
     condition_expression: Optional[str] = None
+    verify_command: Optional[str] = None
+    max_iterations: Optional[int] = 3
 
 
 class WorkflowEdge(BaseModel):
@@ -375,6 +378,10 @@ class LLMRouterConfigRequest(BaseModel):
     nim_max_rpm: Optional[int] = Field(default=None, ge=1, le=600)
     prefer_local: Optional[bool] = None
     clear_cooldowns: bool = False
+    decision_model_enabled: Optional[bool] = None
+    decision_model_provider: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    gemini_decision_model: Optional[str] = None
 
 
 # --- External Chat Bridge Schemas (Telegram / Discord / Webhook) ---

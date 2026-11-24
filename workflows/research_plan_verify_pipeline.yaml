@@ -1,0 +1,72 @@
+id: research_plan_verify_pipeline
+name: Generic Research, Planning & Iterative Verification Pipeline
+description: >
+  Generic iterative workflow for any research, planning, or backlog-building request:
+  Researcher gathers grounded evidence -> Architect synthesizes structured plan & backlog items ->
+  QA Tester verifies quality and completeness, looping back (REWORK) until PASS.
+nodes:
+  - id: start_research_plan
+    name: Research & Planning Request Received
+    type: StartEvent
+
+  - id: stage_deep_research
+    name: Deep Research & Evidence Gathering
+    type: ServiceTask
+    agent_id: researcher
+    entry_type: research
+    prompt_template: >
+      Conduct thorough research on the operator's request using available tools (web_search, repo_search).
+      Gather concrete architectural patterns, implementation details, and verified references.
+      Document all findings clearly on the Blackboard. If this is a REWORK iteration, address every
+      gap identified in the QA critique.
+
+  - id: stage_architect_plan
+    name: Enhancement Plan & Backlog Synthesis
+    type: ServiceTask
+    agent_id: architect
+    entry_type: spec
+    prompt_template: >
+      Synthesize the researcher's findings into a concrete, prioritized enhancement plan and backlog items
+      aligned with AGENTS.md invariants. For each proposed enhancement, include a clear title, technical
+      scope, priority (P0-P3), and acceptance criteria.
+
+  - id: stage_verify_quality
+    name: Iterative Quality & Completeness Verification
+    type: ServiceTask
+    agent_id: qa-tester
+    entry_type: critique
+    prompt_template: >
+      Verify the research findings and enhancement plan against the operator's original request.
+      Check that every claim is grounded, no tool calls were skipped or hallucinated, and backlog items
+      are actionable. Respond with PASS if the result is thorough and ready, or REWORK with specific
+      missing items to iterate on.
+
+  - id: gateway_verify_quality
+    name: Quality Verification Verdict
+    type: ExclusiveGateway
+
+  - id: end_research_plan
+    name: Verified Research & Plan Complete
+    type: EndEvent
+
+edges:
+  - id: rpv_1
+    source: start_research_plan
+    target: stage_deep_research
+  - id: rpv_2
+    source: stage_deep_research
+    target: stage_architect_plan
+  - id: rpv_3
+    source: stage_architect_plan
+    target: stage_verify_quality
+  - id: rpv_4
+    source: stage_verify_quality
+    target: gateway_verify_quality
+  - id: rpv_5_pass
+    source: gateway_verify_quality
+    target: end_research_plan
+    condition: PASS
+  - id: rpv_5_rework
+    source: gateway_verify_quality
+    target: stage_deep_research
+    condition: REWORK

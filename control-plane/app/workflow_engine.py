@@ -79,6 +79,111 @@ class WorkflowEngine:
         return yaml.safe_dump(payload, sort_keys=False)
 
     @staticmethod
+    def ensure_lifecycle_events(state_graph: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Guarantee every non-empty workflow graph has StartEvent and EndEvent
+        nodes and no dangling terminal nodes, so WorkflowEngine always emits
+        Blackboard summaries and channel-agnostic `workflow.completed` pings.
+        """
+        nodes = [dict(n) for n in (state_graph.get("nodes") or [])]
+        edges = [dict(e) for e in (state_graph.get("edges") or [])]
+        if not nodes:
+            return {"nodes": nodes, "edges": edges}
+
+        incoming = {n["id"]: 0 for n in nodes if "id" in n}
+        outgoing = {n["id"]: 0 for n in nodes if "id" in n}
+        for idx, e in enumerate(edges):
+            src, tgt = e.get("source"), e.get("target")
+            if not e.get("id"):
+                e["id"] = f"flow_{src}_{tgt}_{idx}"
+            if src in outgoing:
+                outgoing[src] += 1
+            if tgt in incoming:
+                incoming[tgt] += 1
+
+        start_nodes = [n for n in nodes if n.get("type") == "StartEvent"]
+        if not start_nodes:
+            start_id = "start_event"
+            nodes.insert(0, {"id": start_id, "type": "StartEvent", "name": "Start"})
+            entry_targets = [nid for nid, deg in incoming.items() if deg == 0]
+            if not entry_targets and len(nodes) > 1:
+                entry_targets = [nodes[1]["id"]]
+            for tgt in entry_targets:
+                edges.append({"id": f"flow_{start_id}_{tgt}", "source": start_id, "target": tgt})
+                outgoing[start_id] = outgoing.get(start_id, 0) + 1
+                incoming[tgt] = incoming.get(tgt, 0) + 1
+
+        end_nodes = [n for n in nodes if n.get("type") == "EndEvent"]
+        if not end_nodes:
+            end_id = "end_event"
+            nodes.append({"id": end_id, "type": "EndEvent", "name": "End"})
+        else:
+            end_id = end_nodes[0]["id"]
+
+        # Wire any dangling non-EndEvent terminal nodes to EndEvent
+        for n in nodes:
+            nid = n.get("id")
+            if not nid or n.get("type") == "EndEvent":
+                continue
+            if outgoing.get(nid, 0) == 0:
+                edges.append({"id": f"flow_{nid}_{end_id}", "source": nid, "target": end_id})
+                outgoing[nid] = 1
+
+        return {"nodes": nodes, "edges": edges}
+
+    async def upsert_workflow_from_yaml(
+        self,
+        session: AsyncSession,
+        workflow_id: str,
+        name: str,
+        description: str,
+        yaml_content: str,
+        source: str = "workflow_activator",
+    ) -> WorkflowModel:
+        """
+        Normalize lifecycle events, regenerate BPMN/YAML, persist WorkflowModel,
+        and publish a `workflow.created` / `workflow.updated` Blackboard event.
+        """
+        parsed_g = self.parse_yaml_to_graph(yaml_content)
+        normalized_g = self.ensure_lifecycle_events(
+            {"nodes": parsed_g.get("nodes", []), "edges": parsed_g.get("edges", [])}
+        )
+        canonical_yaml = self.graph_to_yaml(workflow_id, name, description, normalized_g)
+        bpmn_x = self.graph_to_bpmn_xml(workflow_id, name, normalized_g)
+
+        existing_wf = await session.get(WorkflowModel, workflow_id)
+        is_update = existing_wf is not None
+        if existing_wf:
+            existing_wf.name = name or existing_wf.name
+            existing_wf.description = description or existing_wf.description
+            existing_wf.state_graph = normalized_g
+            existing_wf.yaml_source = canonical_yaml
+            existing_wf.bpmn_xml = bpmn_x
+            wf = existing_wf
+        else:
+            wf = WorkflowModel(
+                id=workflow_id,
+                name=name or workflow_id,
+                description=description or "Architect-generated workflow",
+                state_graph=normalized_g,
+                yaml_source=canonical_yaml,
+                bpmn_xml=bpmn_x,
+            )
+            session.add(wf)
+
+        await session.commit()
+        await session.refresh(wf)
+        await self._publish_event(
+            {
+                "event": "workflow.updated" if is_update else "workflow.created",
+                "workflow_id": wf.id,
+                "name": wf.name,
+                "source": source,
+            }
+        )
+        return wf
+
+    @staticmethod
     def graph_to_bpmn_xml(
         workflow_id: str, name: str, state_graph: Dict[str, Any]
     ) -> str:
@@ -93,6 +198,7 @@ class WorkflowEngine:
             "StartEvent": "bpmn:startEvent",
             "EndEvent": "bpmn:endEvent",
             "ServiceTask": "bpmn:serviceTask",
+            "VerificationTask": "bpmn:serviceTask",
             "UserTask": "bpmn:userTask",
             "ParallelGateway": "bpmn:parallelGateway",
             "ExclusiveGateway": "bpmn:exclusiveGateway",
@@ -547,21 +653,7 @@ class WorkflowEngine:
             return
 
         if ntype == "EndEvent":
-            completed = list(run.completed_nodes or [])
-            if nid not in completed:
-                completed.append(nid)
-            run.completed_nodes = completed
-            run.current_nodes = []
-            run.status = "COMPLETED"
-            await self._publish_event(
-                {
-                    "event": "workflow.completed",
-                    "workflow_id": workflow.id,
-                    "run_id": str(run.id),
-                    "node_id": nid,
-                    "status": "COMPLETED",
-                }
-            )
+            await self._complete_workflow_run(session, workflow, run, nid)
             return
 
         if ntype == "UserTask":
@@ -646,6 +738,10 @@ class WorkflowEngine:
                 pass
             return
 
+        if ntype == "VerificationTask" or (ntype == "ServiceTask" and node.get("verify_command")):
+            await self._run_deterministic_verification(session, workflow, run, node)
+            return
+
         # Default: ServiceTask -> Enqueue task to Redis Stream `stream:tasks`
         current = list(run.current_nodes or [])
         if nid not in current:
@@ -685,6 +781,244 @@ class WorkflowEngine:
                 **task_payload,
             }
         )
+
+    async def _complete_workflow_run(
+        self,
+        session: AsyncSession,
+        workflow: WorkflowModel,
+        run: WorkflowRunModel,
+        nid: str,
+    ) -> None:
+        """Finalize run state, synthesize Blackboard summary, emit events, and notify channels."""
+        import asyncio
+        from sqlalchemy import desc
+
+        completed = list(run.completed_nodes or [])
+        if nid not in completed:
+            completed.append(nid)
+        run.completed_nodes = completed
+        run.current_nodes = []
+        run.status = "COMPLETED"
+
+        ctx = run.context or {}
+        origin_channel = ctx.get("origin_channel")
+        origin_chat_id = ctx.get("origin_chat_id")
+
+        summary_lines: List[str] = []
+        problem = (ctx.get("initial_prompt") or "").strip()
+        if problem:
+            summary_lines.append(f"**Goal:** {problem[:280]}")
+        verdict = ctx.get("last_verdict")
+        stage_info = f"{len(completed)} stage(s)" + (f" • Verdict: `{verdict}`" if verdict else "")
+        summary_lines.append(f"**Progress:** {stage_info}")
+
+        try:
+            filters = [
+                BlackboardEntryModel.workflow_id == workflow.id,
+                BlackboardEntryModel.entry_type != "summary",
+            ]
+            if getattr(run, "created_at", None) is not None:
+                filters.append(BlackboardEntryModel.created_at >= run.created_at)
+            entry_stmt = (
+                select(BlackboardEntryModel)
+                .where(*filters)
+                .order_by(desc(BlackboardEntryModel.created_at), desc(BlackboardEntryModel.id))
+                .limit(5)
+            )
+            entry_res = await session.execute(entry_stmt)
+            for ent in reversed(entry_res.scalars().all()):
+                snippet = (ent.content or "").strip().replace("\n", " ")
+                if len(snippet) > 400:
+                    snippet = snippet[:397] + "..."
+                if snippet:
+                    summary_lines.append(f"• **{ent.agent_id}** ({ent.entry_type}): {snippet}")
+        except Exception as exc:
+            logger.debug("Summary query failed at EndEvent: %s", exc)
+
+        if len(summary_lines) <= 2 and not problem:
+            summary_lines.append(f"Completed workflow `{workflow.id}`.")
+
+        summary_text = "\n".join(summary_lines)
+        try:
+            session.add(
+                BlackboardEntryModel(
+                    workflow_id=workflow.id,
+                    task_id=str(run.id),
+                    agent_id="workflow-engine",
+                    entry_type="summary",
+                    content=summary_text,
+                    metadata_={
+                        "run_id": str(run.id),
+                        "status": "COMPLETED",
+                        "origin_channel": origin_channel,
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.debug("Failed to persist EndEvent summary entry: %s", exc)
+
+        await self._publish_event(
+            {
+                "event": "workflow.completed",
+                "workflow_id": workflow.id,
+                "run_id": str(run.id),
+                "node_id": nid,
+                "status": "COMPLETED",
+                "summary": summary_text,
+                "origin_channel": origin_channel,
+            }
+        )
+        try:
+            from app.channel_gateway import channel_gateway
+
+            meta = {"node_id": nid}
+            if origin_chat_id:
+                meta["chat_id"] = origin_chat_id
+            asyncio.create_task(
+                channel_gateway.notify_workflow_completed(
+                    workflow_id=workflow.id,
+                    run_id=str(run.id),
+                    summary=summary_text,
+                    status="COMPLETED",
+                    origin_channel=origin_channel,
+                    metadata=meta,
+                )
+            )
+        except Exception:
+            pass
+
+    async def _run_deterministic_verification(
+        self,
+        session: AsyncSession,
+        workflow: WorkflowModel,
+        run: WorkflowRunModel,
+        node: Dict[str, Any],
+    ) -> None:
+        """
+        Execute a deterministic VerificationTask / verify_command without an LLM turn,
+        feeding failures back to the Blackboard as `critique` with `last_verdict = 'REWORK'`
+        and enforcing `max_iterations` to prevent infinite loops (Archon harness pattern).
+        """
+        import asyncio
+        from app.mcp_gateway import mcp_gateway
+        from app.schemas import ToolInvokeRequest
+
+        nid = node["id"]
+        cmd = (node.get("verify_command") or node.get("command") or "").strip()
+        if not cmd:
+            await self.advance_from_node(session, workflow, run, nid, branch_outcome="PASS")
+            return
+
+        ctx = dict(run.context or {})
+        retry_counts = dict(ctx.get("retry_counts") or {})
+        attempt = int(retry_counts.get(nid, 0)) + 1
+        max_iter = max(1, int(node.get("max_iterations") or 3))
+        agent_id = node.get("agent_id") or "qa-tester"
+
+        invoke_res = await mcp_gateway.invoke_tool(
+            session,
+            ToolInvokeRequest(
+                agent_id=agent_id,
+                workflow_id=workflow.id,
+                task_id=str(run.id),
+                tool_id="bash_executor",
+                arguments={"command": cmd, "timeout": min(int(node.get("timeout") or 60), 60)},
+                bypass_approval=bool(node.get("trusted_command", False)),
+            ),
+        )
+
+        if invoke_res.status == "PENDING_APPROVAL":
+            run.status = "AWAITING_APPROVAL"
+            run.current_nodes = [nid]
+            await self._publish_event(
+                {
+                    "event": "workflow.awaiting_approval",
+                    "workflow_id": workflow.id,
+                    "run_id": str(run.id),
+                    "node_id": nid,
+                    "ticket_id": invoke_res.ticket_id,
+                }
+            )
+            return
+
+        res_dict = invoke_res.result if isinstance(invoke_res.result, dict) else {}
+        exit_code = int(res_dict.get("exit_code", 0 if invoke_res.status == "EXECUTED" else 1))
+        output_text = (
+            res_dict.get("stdout")
+            or res_dict.get("stderr")
+            or res_dict.get("output")
+            or res_dict.get("error")
+            or getattr(invoke_res, "error", None)
+            or f"Tool status: {invoke_res.status}"
+        ).strip()
+        passed = exit_code == 0 and invoke_res.status == "EXECUTED"
+
+        # Persist deterministic check outcome to the Blackboard for downstream context
+        session.add(
+            BlackboardEntryModel(
+                workflow_id=workflow.id,
+                task_id=str(run.id),
+                agent_id=agent_id,
+                entry_type="test_result" if passed else "critique",
+                content=(
+                    f"Deterministic check `{cmd}` (attempt {attempt}/{max_iter}) "
+                    f"{'PASSED' if passed else f'FAILED (exit {exit_code})'}:\n{output_text[:1200]}"
+                ),
+                metadata_={"node_id": nid, "exit_code": exit_code, "attempt": attempt},
+            )
+        )
+
+        if passed:
+            retry_counts[nid] = 0
+            ctx["retry_counts"] = retry_counts
+            ctx["last_verdict"] = "PASS"
+            run.context = ctx
+            await self.advance_from_node(session, workflow, run, nid, branch_outcome="PASS")
+            return
+
+        retry_counts[nid] = attempt
+        ctx["retry_counts"] = retry_counts
+
+        if invoke_res.status == "BLOCKED_RBAC" or attempt >= max_iter:
+            ctx["last_verdict"] = "FAIL_LIMIT"
+            run.context = ctx
+            run.status = "FAILED"
+            run.current_nodes = []
+            fail_summary = (
+                f"**Goal:** {ctx.get('initial_prompt', workflow.id)}\n"
+                f"**Failed Gate:** `{nid}` (`{cmd}`) after {attempt}/{max_iter} attempts.\n"
+                f"**Last Error:** {output_text[:400]}"
+            )
+            await self._publish_event(
+                {
+                    "event": "workflow.failed",
+                    "workflow_id": workflow.id,
+                    "run_id": str(run.id),
+                    "node_id": nid,
+                    "status": "FAILED",
+                    "summary": fail_summary,
+                }
+            )
+            try:
+                from app.channel_gateway import channel_gateway
+
+                asyncio.create_task(
+                    channel_gateway.notify_workflow_completed(
+                        workflow_id=workflow.id,
+                        run_id=str(run.id),
+                        summary=fail_summary,
+                        status="FAILED",
+                        origin_channel=ctx.get("origin_channel"),
+                        metadata={"node_id": nid},
+                    )
+                )
+            except Exception:
+                pass
+            return
+
+        ctx["last_verdict"] = "REWORK"
+        run.context = ctx
+        await self.advance_from_node(session, workflow, run, nid, branch_outcome="REWORK")
 
     async def prune_and_summarize_blackboard(
         self,

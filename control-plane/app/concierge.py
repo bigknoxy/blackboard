@@ -47,10 +47,27 @@ from app.database import get_redis
 logger = logging.getLogger("blackboard.concierge")
 
 LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.150:11434")
-CONCIERGE_OPENAI_URL = os.getenv(
-    "CONCIERGE_OPENAI_URL", "http://192.168.1.180:8081/v1"
+CONCIERGE_OPENAI_URL = (
+    os.getenv("CONCIERGE_OPENAI_URL")
+    or os.getenv("LAN_CT118_QWEN_URL")
+    or os.getenv("LAN_LAPTOP_QWEN_URL")
+    or "http://192.168.8.180:8081/v1"
 )
 CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL", "qwen3-4b")
+CLASSIFIER_OPENAI_URL = (
+    os.getenv("CLASSIFIER_OPENAI_URL")
+    or os.getenv("LAN_CT118_LFM_URL")
+    or os.getenv("LAN_LAPTOP_LFM_URL")
+    or "http://192.168.8.180:8090/v1"
+)
+LAN_LAPTOP_LFM_URL = os.getenv("LAN_LAPTOP_LFM_URL") or "http://192.168.8.149:8090/v1"
+CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "lfm3-1.7b")
+DECISION_MODEL_ENABLED = os.getenv("DECISION_MODEL_ENABLED", "true").lower() not in ("false", "0", "no")
+DECISION_MODEL_PROVIDER = os.getenv("DECISION_MODEL_PROVIDER", "local").strip().lower()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_DECISION_MODEL = os.getenv("GEMINI_DECISION_MODEL", "gemini-decision-1").strip()
+CLASSIFIER_CONFIDENCE_HIGH = float(os.getenv("CLASSIFIER_CONFIDENCE_HIGH", "0.75"))
+CLASSIFIER_CONFIDENCE_LOW = float(os.getenv("CLASSIFIER_CONFIDENCE_LOW", "0.45"))
 DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "qwen2.5-coder:0.5b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "768"))
@@ -201,13 +218,20 @@ class ConciergeAdminAgent:
         )
         if is_confirmation and req.history:
             last_assistant_msg = next((h["content"] for h in reversed(req.history) if h.get("role") == "assistant"), "")
-            if "weather" in last_assistant_msg.lower():
+            la_lower = last_assistant_msg.lower()
+            if "weather" in la_lower:
                 r = get_redis()
                 op_loc = await r.get("operator:location")
                 target_loc = op_loc or "Topeka, KS"
                 msg = f"get the current weather for {target_loc}"
                 lowered = msg.lower()
-            elif any(k in last_assistant_msg.lower() for k in ["search", "look up", "lookup"]):
+            elif any(k in la_lower for k in ["list_memories", "stored memories", "memories", "research"]):
+                msg = "list memories and show research results"
+                lowered = msg.lower()
+            elif "backlog" in la_lower:
+                msg = "show backlog"
+                lowered = msg.lower()
+            elif any(k in la_lower for k in ["search", "look up", "lookup"]):
                 msg = "search the web"
                 lowered = msg.lower()
 
@@ -263,12 +287,41 @@ class ConciergeAdminAgent:
                 }
             )
 
-        if any(
+        explicit_wf_match = re.search(
+            r"\b(?:run|start|trigger|execute)\s+([a-z0-9_-]+_(?:pipeline|workflow))\b",
+            lowered,
+        )
+        if explicit_wf_match or any(
             k in lowered
             for k in ["run workflow", "start workflow", "trigger pipeline"]
         ):
-            wf_id = req.workflow_id or "code_review_pipeline"
+            wf_id = (
+                explicit_wf_match.group(1)
+                if explicit_wf_match
+                else (req.workflow_id or "code_review_pipeline")
+            )
             wf = await session.get(WorkflowModel, wf_id)
+            if wf:
+                run = await workflow_engine.start_workflow_run(
+                    session, wf, initial_prompt=msg
+                )
+                tool_calls_executed.append(
+                    {
+                        "tool": "trigger_workflow",
+                        "workflow_id": wf_id,
+                        "run_id": str(run.id),
+                        "status": run.status,
+                    }
+                )
+        elif (
+            any(k in lowered for k in ["do planning and research", "plan and research", "planning and research", "research and add"])
+            and not any(q in lowered for q in ["did you", "have you", "what research", "status"])
+        ):
+            wf_id = "research_plan_verify_pipeline"
+            wf = await session.get(WorkflowModel, wf_id)
+            if not wf:
+                wf_id = req.workflow_id or "code_review_pipeline"
+                wf = await session.get(WorkflowModel, wf_id)
             if wf:
                 run = await workflow_engine.start_workflow_run(
                     session, wf, initial_prompt=msg
@@ -434,7 +487,8 @@ class ConciergeAdminAgent:
         if any(
             k in lowered for k in [
                 "show backlog", "list backlog", "what ideas", "view ideas",
-                "show ideas", "backlog items", "what is on the backlog"
+                "show ideas", "backlog items", "what is on the backlog",
+                "check backlog", "check the backlog", "did you add"
             ]
         ):
             b_res = await session.execute(
@@ -987,7 +1041,10 @@ class ConciergeAdminAgent:
             k in lowered for k in [
                 "what do your other memories include", "what memories", "list memories",
                 "show memories", "search memory", "what is in memory", "what do you remember",
-                "other memories", "inspect memories", "view memories"
+                "other memories", "inspect memories", "view memories",
+                "did you conduct", "what research", "research results", "any research",
+                "check memory", "check memories", "stored memories",
+                "what did you find", "what did the researcher", "retrieve the stored memories"
             ]
         ) and not is_remember_intent:
             all_mems_res = await session.execute(
@@ -996,7 +1053,7 @@ class ConciergeAdminAgent:
             all_mems = all_mems_res.scalars().all()
             breakdown: Dict[str, List[str]] = {}
             for m in all_mems:
-                breakdown.setdefault(m.agent_id, []).append(m.content[:140])
+                breakdown.setdefault(m.agent_id, []).append(m.content[:300])
 
             tool_calls_executed.append({
                 "tool": "list_memories",
@@ -1061,48 +1118,125 @@ class ConciergeAdminAgent:
             }
         )
 
-        # Attempt LLM synthesis via LAN Ollama if reachable; otherwise synthesize rich admin report
-        llm_reply = await self._try_ollama_chat(
+        # Stage 2: Lightweight Structured Intent Classifier (Archon orchestrator pattern)
+        if len(tool_calls_executed) == 1 and len(msg.strip()) > 8:
+            available_wfs = [w["id"] for w in state_snapshot.get("workflows", [])]
+            decision = await self._classify_intent(msg, available_wfs)
+            d_intent = decision.get("intent", "chat")
+            d_conf = float(decision.get("confidence", 0.0))
+            if d_intent == "trigger_workflow":
+                if d_conf >= CLASSIFIER_CONFIDENCE_HIGH:
+                    target_wf = (
+                        decision.get("workflow_id")
+                        or ("research_plan_verify_pipeline" if "research_plan_verify_pipeline" in available_wfs else None)
+                        or req.workflow_id
+                        or "code_review_pipeline"
+                    )
+                    wf_obj = await session.get(WorkflowModel, target_wf)
+                    if wf_obj:
+                        run = await workflow_engine.start_workflow_run(
+                            session, wf_obj, initial_prompt=msg
+                        )
+                        tool_calls_executed.append(
+                            {
+                                "tool": "trigger_workflow",
+                                "workflow_id": target_wf,
+                                "run_id": str(run.id),
+                                "status": run.status,
+                                "routed_by": "intent_classifier",
+                                "confidence": d_conf,
+                            }
+                        )
+                elif d_conf >= CLASSIFIER_CONFIDENCE_LOW:
+                    wf_choices = ", ".join(f"`{w}`" for w in available_wfs[:4]) or "`code_review_pipeline`"
+                    tool_calls_executed.append(
+                        {
+                            "tool": "intent_classifier",
+                            "status": "NEEDS_CLARIFICATION",
+                            **decision,
+                        }
+                    )
+                    return ConciergeChatResponse(
+                        reply=f"Did you want me to start a workflow ({wf_choices}), or just answer conversationally?",
+                        tool_calls_executed=tool_calls_executed,
+                        system_state_summary=state_snapshot,
+                    )
+            elif d_intent == "inspect_state" and d_conf >= CLASSIFIER_CONFIDENCE_HIGH:
+                bb_obs = await self._execute_concierge_tool(
+                    session, "list_blackboard", {"limit": 10}, req.workflow_id or "code_review_pipeline"
+                )
+                tool_calls_executed.append(
+                    {
+                        "tool": "list_blackboard",
+                        "routed_by": "intent_classifier",
+                        "confidence": d_conf,
+                        **bb_obs,
+                    }
+                )
+
+        # Attempt LLM synthesis via LAN Ollama/llama.cpp if reachable; otherwise synthesize rich admin report
+        llm_reply, native_calls = await self._try_ollama_chat_with_tools(
             msg, state_snapshot, tool_calls_executed, history=req.history
         )
-        if llm_reply:
-            cleaned_reply, parsed_calls = self._sanitize_and_extract_tool_calls(llm_reply)
+        if llm_reply is not None or native_calls:
+            cleaned_reply, xml_calls = self._sanitize_and_extract_tool_calls(llm_reply or "")
+            parsed_calls = list(native_calls) + list(xml_calls)
 
-            # Multi-Turn ReAct Loop: Execute tools extracted from LLM and feed observations back for follow-up
-            unexecuted_calls = [
-                pc for pc in parsed_calls
-                if pc.get("tool") and not any(
-                    t.get("tool") == pc.get("tool") and t.get("status") in ("EXECUTED", "STORED", "RETRIEVED", "PENDING_APPROVAL")
-                    for t in tool_calls_executed
-                )
-            ]
-            if unexecuted_calls:
+            # Multi-Turn ReAct Loop (up to 3 rounds): Execute tools requested by LLM and feed observations back
+            for _react_turn in range(3):
+                unexecuted_calls = [
+                    pc for pc in parsed_calls
+                    if pc.get("tool") and not any(
+                        t.get("tool") == pc.get("tool")
+                        and t.get("status") in ("EXECUTED", "STORED", "RETRIEVED", "PENDING_APPROVAL", "CREATED", "OK")
+                        for t in tool_calls_executed
+                    )
+                ]
+                if not unexecuted_calls:
+                    break
+
+                mutated = False
                 for pc in unexecuted_calls:
+                    t_name = pc.get("tool")
                     tool_res = await self._execute_concierge_tool(
                         session=session,
-                        tool_name=pc.get("tool"),
+                        tool_name=t_name,
                         args=pc.get("arguments", {}),
                         workflow_id=req.workflow_id,
                     )
                     tool_calls_executed.append(tool_res)
+                    if t_name in mutating_tools:
+                        mutated = True
 
-                # Second turn: synthesize observations into final response
-                second_reply = await self._try_ollama_chat(
+                if mutated:
+                    self.invalidate_state_cache()
+                    state_snapshot = await self._build_state_snapshot(session, req.workflow_id)
+
+                follow_reply, follow_native = await self._try_ollama_chat_with_tools(
                     msg, state_snapshot, tool_calls_executed, history=req.history
                 )
-                if second_reply:
-                    sec_clean, _ = self._sanitize_and_extract_tool_calls(second_reply)
-                    if sec_clean and len(sec_clean.strip()) >= 20:
-                        cleaned_reply = sec_clean
+                if follow_reply is None and not follow_native:
+                    break
+                sec_clean, sec_xml = self._sanitize_and_extract_tool_calls(follow_reply or "")
+                parsed_calls = list(follow_native) + list(sec_xml)
+                if sec_clean and len(sec_clean.strip()) >= 10:
+                    cleaned_reply = sec_clean
             else:
                 for pc in parsed_calls:
-                    if not any(t.get("tool") == pc.get("tool") for t in tool_calls_executed):
+                    if pc.get("tool") and not any(t.get("tool") == pc.get("tool") for t in tool_calls_executed):
                         tool_calls_executed.append(pc)
 
+            trig_calls = [t for t in tool_calls_executed if t.get("tool") == "trigger_workflow" and t.get("run_id")]
             has_architect_gap = any(t.get("tool") == "architect_tool_gap_analysis" for t in tool_calls_executed)
             has_capabilities = any(t.get("tool") == "describe_capabilities" for t in tool_calls_executed)
             has_weather = any(t.get("tool") == "weather_lookup" for t in tool_calls_executed)
-            if has_architect_gap:
+            if trig_calls:
+                t0 = trig_calls[0]
+                llm_reply = (
+                    f"🚀 Started **{t0['workflow_id']}** (Run `{str(t0['run_id'])[:8]}`). "
+                    f"I'll notify you on HITL gates and when it completes."
+                )
+            elif has_architect_gap:
                 det_reply = self._format_deterministic_reply(msg, state_snapshot, tool_calls_executed)
                 if not cleaned_reply or len(cleaned_reply.strip()) < 30 or not any(k in cleaned_reply for k in ["code_linter_ast", "git_diff_inspector", "container_sandbox_runner"]):
                     llm_reply = det_reply
@@ -1205,19 +1339,170 @@ class ConciergeAdminAgent:
                 "ticket_id": res.ticket_id,
             }
         elif tool_name == "list_memories":
-            all_mems_res = await session.execute(
-                select(AgentMemoryModel).order_by(AgentMemoryModel.created_at.desc()).limit(25)
-            )
+            target_agent = args.get("agent_id")
+            limit_val = min(int(args.get("limit") or 25), 50)
+            stmt = select(AgentMemoryModel).order_by(AgentMemoryModel.created_at.desc())
+            if target_agent:
+                stmt = stmt.where(AgentMemoryModel.agent_id == str(target_agent))
+            all_mems_res = await session.execute(stmt.limit(limit_val))
             all_mems = all_mems_res.scalars().all()
             breakdown: Dict[str, List[str]] = {}
             for m in all_mems:
-                breakdown.setdefault(m.agent_id, []).append(m.content[:140])
+                breakdown.setdefault(m.agent_id, []).append(m.content[:300])
             return {
                 "tool": "list_memories",
                 "count": len(all_mems),
                 "agents": list(breakdown.keys()),
                 "status": "RETRIEVED",
                 "breakdown": breakdown,
+            }
+        elif tool_name == "search_memories":
+            query = str(args.get("query") or args.get("q") or "").strip()
+            target_agent = args.get("agent_id")
+            q_emb = await compute_embedding(query or "research")
+            stmt = select(AgentMemoryModel)
+            if target_agent:
+                stmt = stmt.where(AgentMemoryModel.agent_id == str(target_agent))
+            res_m = await session.execute(stmt.limit(100))
+            mems = res_m.scalars().all()
+            scored = []
+            for m in mems:
+                emb = [float(x) for x in m.embedding] if m.embedding is not None else []
+                sim = sum(float(a) * b for a, b in zip(q_emb, emb)) if len(emb) == len(q_emb) else 0.0
+                scored.append((float(sim), m))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top = [
+                {"agent_id": m.agent_id, "content": m.content[:300], "score": round(float(s), 4)}
+                for s, m in scored[:8]
+            ]
+            return {
+                "tool": "search_memories",
+                "query": query,
+                "count": len(top),
+                "status": "RETRIEVED",
+                "results": top,
+            }
+        elif tool_name == "store_memory":
+            content = str(args.get("content") or args.get("fact") or "").strip()
+            target_agent = str(args.get("agent_id") or "concierge-admin").strip()
+            if not content:
+                return {"tool": "store_memory", "status": "SKIPPED", "message": "Empty content"}
+            if not await session.get(AgentModel, target_agent):
+                target_agent = "concierge-admin"
+            emb = await compute_embedding(content)
+            new_mem = AgentMemoryModel(
+                agent_id=target_agent,
+                memory_type=str(args.get("memory_type") or "semantic"),
+                content=content,
+                embedding=emb,
+            )
+            session.add(new_mem)
+            await session.commit()
+            await session.refresh(new_mem)
+            return {
+                "tool": "store_memory",
+                "agent_id": target_agent,
+                "memory_id": str(new_mem.id),
+                "content": content,
+                "status": "STORED",
+            }
+        elif tool_name == "list_backlog":
+            b_res = await session.execute(
+                select(BacklogItemModel).order_by(BacklogItemModel.created_at.desc()).limit(15)
+            )
+            b_items = b_res.scalars().all()
+            return {
+                "tool": "list_backlog",
+                "count": len(b_items),
+                "status": "RETRIEVED",
+                "items": [
+                    {
+                        "key": i.key,
+                        "title": i.title,
+                        "description": (i.description or "")[:200],
+                        "status": i.status,
+                        "priority": i.priority,
+                    }
+                    for i in b_items
+                ],
+            }
+        elif tool_name == "capture_idea":
+            title = str(args.get("title") or "Untitled Enhancement").strip()[:120]
+            desc = str(args.get("description") or title).strip()
+            prio = str(args.get("priority") or "P1").strip()
+            key = f"BL-{uuid.uuid4().hex[:6].upper()}"
+            b_item = BacklogItemModel(
+                key=key,
+                title=title,
+                description=desc,
+                category="feature",
+                priority=prio,
+                status="idea",
+                tags=["concierge_tool", "operator_idea"],
+                metadata_={"source": "concierge_react_tool"},
+            )
+            session.add(b_item)
+            await session.commit()
+            await session.refresh(b_item)
+            await workflow_engine._publish_event(
+                {
+                    "event": "backlog.created",
+                    "id": str(b_item.id),
+                    "key": b_item.key,
+                    "title": b_item.title,
+                    "status": b_item.status,
+                }
+            )
+            return {
+                "tool": "capture_idea",
+                "key": b_item.key,
+                "title": b_item.title,
+                "status": "CREATED",
+            }
+        elif tool_name == "list_blackboard":
+            target_wf = args.get("workflow_id")
+            limit_val = min(int(args.get("limit") or 12), 30)
+            bb_stmt = select(BlackboardEntryModel).order_by(BlackboardEntryModel.created_at.desc())
+            if target_wf and str(target_wf).lower() != "all":
+                bb_stmt = bb_stmt.where(BlackboardEntryModel.workflow_id == str(target_wf))
+            bb_res = await session.execute(bb_stmt.limit(limit_val))
+            entries = bb_res.scalars().all()
+            return {
+                "tool": "list_blackboard",
+                "count": len(entries),
+                "status": "RETRIEVED",
+                "entries": [
+                    {
+                        "workflow_id": e.workflow_id,
+                        "agent_id": e.agent_id,
+                        "entry_type": e.entry_type,
+                        "content": e.content[:250],
+                    }
+                    for e in entries
+                ],
+            }
+        elif tool_name == "trigger_workflow":
+            target_wf = str(args.get("workflow_id") or "research_plan_verify_pipeline").strip()
+            prob = str(args.get("problem_statement") or "Execute requested multi-agent workflow.").strip()
+            wf_obj = await session.get(WorkflowModel, target_wf)
+            if not wf_obj:
+                target_wf = wf_id
+                wf_obj = await session.get(WorkflowModel, target_wf)
+            if not wf_obj:
+                return {
+                    "tool": "trigger_workflow",
+                    "workflow_id": target_wf,
+                    "status": "NOT_FOUND",
+                    "message": f"Workflow '{target_wf}' not found.",
+                }
+            run_res = await workflow_engine.start_workflow_run(
+                session, wf_obj, initial_prompt=prob
+            )
+            return {
+                "tool": "trigger_workflow",
+                "workflow_id": target_wf,
+                "run_id": str(run_res.id),
+                "status": "EXECUTED",
             }
         else:
             # Generic MCP tool invocation
@@ -1409,6 +1694,412 @@ class ConciergeAdminAgent:
             context = "Operator timezone not explicitly configured (UTC default)."
         return date_str, context
 
+    OPENAI_TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_memories",
+                "description": "Retrieve stored pgvector memories across all agents or for a specific agent_id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "Optional agent ID filter (e.g. 'researcher', 'architect')."},
+                        "limit": {"type": "integer", "description": "Max memories to retrieve (default 25)."},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_memories",
+                "description": "Semantic vector similarity search across stored agent memories.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query text."},
+                        "agent_id": {"type": "string", "description": "Optional agent ID filter."},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "store_memory",
+                "description": "Persist a fact, research finding, or operator preference into pgvector memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "Memory content to store."},
+                        "agent_id": {"type": "string", "description": "Target agent ID (default 'concierge-admin')."},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_backlog",
+                "description": "List backlog items, ideas, and future enhancements.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "capture_idea",
+                "description": "Add a new idea, enhancement, or research task to the persistent backlog.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Short title for the backlog item."},
+                        "description": {"type": "string", "description": "Detailed description."},
+                        "priority": {"type": "string", "description": "Priority: P0, P1, or P2."},
+                    },
+                    "required": ["title"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_blackboard",
+                "description": "Inspect recent blackboard entries across workflows.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "Optional workflow_id or 'all'."},
+                        "limit": {"type": "integer", "description": "Number of entries (default 12)."},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Execute a live internet search for current events, documentation, or external research.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query."},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "weather_lookup",
+                "description": "Retrieve real-time weather conditions and forecast for a location.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City, State or location."},
+                    },
+                    "required": ["location"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "bash_executor",
+                "description": "Execute a shell command in the environment (HITL gated).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Shell command to run."},
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "trigger_workflow",
+                "description": "Trigger a multi-agent workflow run (e.g. 'research_plan_verify_pipeline' for iterative research + planning + QA verification, 'intake_pipeline', or 'code_review_pipeline').",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "Workflow ID to run (default 'research_plan_verify_pipeline')."},
+                        "problem_statement": {"type": "string", "description": "Clear problem statement or research goal for the agents."},
+                    },
+                    "required": ["problem_statement"],
+                },
+            },
+        },
+    ]
+
+    @staticmethod
+    def _extract_native_tool_calls(msg_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+        calls: List[Dict[str, Any]] = []
+        raw_calls = msg_obj.get("tool_calls") or []
+        for tc in raw_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name")
+            if not name:
+                continue
+            raw_args = fn.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args) if raw_args.strip() else {}
+                except Exception:
+                    args = {}
+            elif isinstance(raw_args, dict):
+                args = raw_args
+            else:
+                args = {}
+            calls.append({
+                "tool": name,
+                "arguments": args,
+                "extracted_from_llm": True,
+            })
+        return calls
+
+    @staticmethod
+    def _parse_gemini_decision_response(
+        data: Dict[str, Any],
+        available_workflows: List[str],
+        valid_intents: set,
+    ) -> Optional[Dict[str, Any]]:
+        """Parse choice + confidence payloads from Google AI Studio Decisions API."""
+        if not isinstance(data, dict):
+            return None
+
+        items = (
+            data.get("decisions")
+            or data.get("answers")
+            or data.get("results")
+            or data.get("choices")
+        )
+        intent_choice = None
+        wf_choice = None
+        intent_conf: Optional[float] = None
+
+        def _extract_choice_and_conf(entry: Any) -> Tuple[Optional[str], Optional[float]]:
+            if isinstance(entry, str):
+                return entry, None
+            if not isinstance(entry, dict):
+                return None, None
+            ch = (
+                entry.get("choice")
+                or entry.get("choice_id")
+                or entry.get("choiceId")
+                or entry.get("selected_choice_id")
+                or entry.get("selectedChoiceId")
+                or entry.get("answer")
+                or entry.get("value")
+            )
+            if isinstance(ch, dict):
+                ch = ch.get("id") or ch.get("choice") or ch.get("choice_id")
+            conf_raw = entry.get("confidence") if entry.get("confidence") is not None else entry.get("score")
+            conf_val = float(conf_raw) if conf_raw is not None else None
+            return (str(ch).strip() if ch is not None else None), conf_val
+
+        if isinstance(items, dict):
+            if "intent" in items:
+                intent_choice, intent_conf = _extract_choice_and_conf(items["intent"])
+            if "workflow_id" in items:
+                wf_choice, _ = _extract_choice_and_conf(items["workflow_id"])
+        elif isinstance(items, list):
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                qid = str(
+                    item.get("question_id")
+                    or item.get("questionId")
+                    or item.get("id")
+                    or ""
+                ).strip()
+                ch, conf = _extract_choice_and_conf(item)
+                if qid == "intent" or (not qid and idx == 0):
+                    intent_choice, intent_conf = ch, conf
+                elif qid == "workflow_id" or (not qid and idx == 1):
+                    wf_choice = ch
+
+        if not intent_choice:
+            return None
+
+        intent_str = intent_choice if intent_choice in valid_intents else "chat"
+        wf_str = (
+            wf_choice
+            if wf_choice and wf_choice in available_workflows
+            else None
+        )
+        conf_final = max(0.0, min(1.0, intent_conf if intent_conf is not None else 0.85))
+        return {
+            "intent": intent_str,
+            "workflow_id": wf_str,
+            "confidence": conf_final,
+            "provider": "gemini",
+        }
+
+    async def _classify_intent(
+        self, user_msg: str, available_workflows: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Lightweight structured decision classifier (Archon orchestrator pattern).
+        Supports runtime toggling (ON/OFF) and provider selection (`local` vs `gemini`)
+        via Redis (`llm:decision:*`) with automatic fallback to local LAN tiers.
+        """
+        valid_intents = {"trigger_workflow", "inspect_state", "memory_op", "tool_exec", "chat"}
+        fallback = {"intent": "chat", "workflow_id": None, "confidence": 0.0, "reason": "fallback"}
+
+        enabled = os.getenv("DECISION_MODEL_ENABLED", "true" if DECISION_MODEL_ENABLED else "false").lower() not in ("false", "0", "no")
+        provider = os.getenv("DECISION_MODEL_PROVIDER", DECISION_MODEL_PROVIDER).strip().lower()
+        gemini_api_key = os.getenv("GEMINI_API_KEY", GEMINI_API_KEY).strip()
+        gemini_model = os.getenv("GEMINI_DECISION_MODEL", GEMINI_DECISION_MODEL).strip() or "gemini-decision-1"
+
+        redis_client = None
+        try:
+            redis_client = await get_redis()
+            r_en = await redis_client.get("llm:decision:enabled")
+            if r_en is not None:
+                enabled = str(r_en).lower() not in ("false", "0", "no")
+            r_prov = await redis_client.get("llm:decision:provider")
+            if r_prov:
+                provider = str(r_prov).strip().lower()
+            r_key = await redis_client.get("llm:decision:gemini_api_key")
+            if r_key:
+                gemini_api_key = str(r_key).strip()
+            r_gmodel = await redis_client.get("llm:decision:gemini_model")
+            if r_gmodel:
+                gemini_model = str(r_gmodel).strip()
+        except Exception as exc:
+            logger.debug("Redis unavailable while loading decision model config: %s", exc)
+
+        if not enabled:
+            return {"intent": "chat", "workflow_id": None, "confidence": 0.0, "reason": "disabled"}
+
+        if provider == "gemini" and gemini_api_key:
+            in_cooldown = False
+            try:
+                if redis_client is not None:
+                    in_cooldown = bool(await redis_client.get("llm:cooldown:gemini_decision"))
+            except Exception:
+                in_cooldown = False
+
+            if not in_cooldown:
+                wf_choices = [{"id": wf, "label": wf} for wf in available_workflows] + [
+                    {"id": "none", "label": "No workflow needed"}
+                ]
+                decision_payload = {
+                    "model": gemini_model,
+                    "input": user_msg[:800],
+                    "questions": [
+                        {
+                            "id": "intent",
+                            "prompt": "Classify the operator request intent.",
+                            "choices": [
+                                {"id": "trigger_workflow", "label": "Run or start a multi-agent workflow pipeline"},
+                                {"id": "inspect_state", "label": "Inspect platform status, blackboard, backlog, or agents"},
+                                {"id": "memory_op", "label": "Remember, recall, or search stored memories"},
+                                {"id": "tool_exec", "label": "Execute shell command, web search, or weather lookup"},
+                                {"id": "chat", "label": "General chat, greeting, or explanation"},
+                            ],
+                        },
+                        {
+                            "id": "workflow_id",
+                            "prompt": "Select the target workflow_id if intent is trigger_workflow.",
+                            "choices": wf_choices,
+                        },
+                    ],
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        resp = await client.post(
+                            f"https://generativelanguage.googleapis.com/v1beta/decisions?key={gemini_api_key}",
+                            json=decision_payload,
+                        )
+                    if resp.status_code == 429:
+                        logger.warning("Gemini Decisions API returned 429; setting 60s cooldown and falling back to local.")
+                        try:
+                            if redis_client is not None:
+                                await redis_client.setex("llm:cooldown:gemini_decision", 60, "429")
+                        except Exception:
+                            pass
+                    elif resp.status_code == 200:
+                        parsed_decision = self._parse_gemini_decision_response(
+                            resp.json() or {}, available_workflows, valid_intents
+                        )
+                        if parsed_decision is not None:
+                            return parsed_decision
+                    else:
+                        logger.warning(
+                            "Gemini Decisions API returned HTTP %s; falling back to local.",
+                            resp.status_code,
+                        )
+                except Exception as exc:
+                    logger.warning("Gemini Decisions API call failed (%s); falling back to local.", exc)
+
+        system_prompt = (
+            "You are a fast intent classifier for a multi-agent workflow system.\n"
+            f"Available workflows: {json.dumps(available_workflows)}\n"
+            "Classify the user message into STRICT JSON with keys:\n"
+            '{"intent": "trigger_workflow|inspect_state|memory_op|tool_exec|chat", '
+            '"workflow_id": "<exact workflow id or null>", "confidence": 0.0-1.0}\n'
+            "Rules:\n"
+            "- trigger_workflow: user wants to run/start/build/review/fix/research via a pipeline.\n"
+            "- inspect_state: user asks about current status, blackboard, backlog, or agents.\n"
+            "- memory_op: user asks to remember, recall, or search memories.\n"
+            "- tool_exec: user asks to run a shell command, web search, or weather lookup.\n"
+            "- chat: greetings, explanations, or general questions.\n"
+            "Output ONLY valid JSON."
+        )
+        laptop_lfm_url = os.getenv("LAN_LAPTOP_LFM_URL") or LAN_LAPTOP_LFM_URL
+        endpoints: List[Tuple[str, str]] = []
+        for url, model in [
+            (CLASSIFIER_OPENAI_URL, CLASSIFIER_MODEL),
+            (laptop_lfm_url, CLASSIFIER_MODEL),
+            (CONCIERGE_OPENAI_URL, CONCIERGE_MODEL),
+        ]:
+            if url and url not in {u for u, _ in endpoints}:
+                endpoints.append((url, model))
+
+        for base_url, model_name in endpoints:
+            try:
+                async with httpx.AsyncClient(timeout=3.5) as client:
+                    resp = await client.post(
+                        f"{base_url.rstrip('/')}/chat/completions",
+                        json={
+                            "model": model_name,
+                            "temperature": 0.0,
+                            "max_tokens": 160,
+                            "chat_template_kwargs": {"enable_thinking": False},
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_msg[:800]},
+                            ],
+                        },
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    choices = (resp.json() or {}).get("choices") or []
+                    if not choices:
+                        continue
+                    raw = ((choices[0].get("message") or {}).get("content") or "").strip()
+                    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+                    parsed = json.loads(cleaned)
+                    intent = str(parsed.get("intent") or "chat").strip()
+                    if intent not in valid_intents:
+                        intent = "chat"
+                    wf = parsed.get("workflow_id")
+                    wf_str = str(wf).strip() if wf and str(wf).strip() in available_workflows else None
+                    conf = max(0.0, min(1.0, float(parsed.get("confidence") or 0.0)))
+                    return {"intent": intent, "workflow_id": wf_str, "confidence": conf}
+            except Exception as exc:
+                logger.debug("Classifier call to %s failed: %s", base_url, exc)
+                continue
+        return fallback
+
     async def _try_ollama_chat(
         self,
         user_msg: str,
@@ -1416,18 +2107,34 @@ class ConciergeAdminAgent:
         executed_tools: List[Dict[str, Any]],
         history: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[str]:
+        content, _ = await self._try_ollama_chat_with_tools(
+            user_msg, snapshot, executed_tools, history=history
+        )
+        return content
+
+    async def _try_ollama_chat_with_tools(
+        self,
+        user_msg: str,
+        snapshot: Dict[str, Any],
+        executed_tools: List[Dict[str, Any]],
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
         current_date_str, tz_context = self._compute_grounding_strings(snapshot)
         system_prompt = (
             f"You are the Concierge Admin Agent for the Multi-Agent Blackboard Control Plane.\n"
             f"Current temporal grounding: {current_date_str}.\n"
             f"{tz_context}\n"
-            f"You have live access to platform state, stored pgvector memories, and executed MCP tools (web_search, weather_lookup, bash_executor, store_memory, list_memories, architect_tool_gap_analysis). "
+            f"You have live access to platform state, stored pgvector memories, backlog, blackboard, and MCP tools "
+            f"(list_memories, search_memories, store_memory, list_backlog, capture_idea, list_blackboard, web_search, weather_lookup, bash_executor).\n"
+            f"ACTION FIRST RULE: NEVER say 'I don't have visibility without executing X' or 'Would you like me to run list_memories / list_backlog / web_search?'. "
+            f"Whenever you need to inspect stored memories, research findings, backlog items, blackboard entries, or live web data, CALL THE TOOL IMMEDIATELY in this turn and report the real results.\n"
+            f"If you emit a tool call in text instead of native tool_calls, format it as <tool_call>{{\"tool\": \"tool_name\", \"arguments\": {{}}}}</tool_call>.\n"
             f"If weather_lookup was executed, present current weather conditions, temperature, humidity, and wind clearly. "
             f"If store_memory was executed, confirm to the operator what was stored in pgvector. "
-            f"If list_memories was executed, detail the stored memories per agent using the executed tool results. "
+            f"If list_memories or search_memories was executed, detail the actual stored memories per agent using the executed tool results. "
             f"Never claim you cannot access or read memories if list_memories was executed. "
             f"If web_search was executed, integrate the live search results and answer the operator accurately and concisely. "
-            f"CRITICAL: Never output raw XML tags such as <tool_call>, <arg_key>, or <arg_value> in your response to the operator. Present all findings, status updates, and agent recommendations in clean, readable Markdown. "
+            f"CRITICAL: Never output raw XML tags such as <tool_call>, <arg_key>, or <arg_value> in your final answer to the operator. Present all findings in clean, readable Markdown.\n"
             f"Always answer the operator accurately and concisely."
         )
         compact_summary = {
@@ -1435,6 +2142,7 @@ class ConciergeAdminAgent:
             "workflows": [w["id"] for w in snapshot.get("workflows", [])],
             "pending_hitl_count": len(snapshot.get("pending_hitl", [])),
             "total_memories": snapshot.get("total_memories", 0),
+            "recent_blackboard_count": len(snapshot.get("recent_blackboard_entries", [])),
             "operator_timezone": snapshot.get("operator_timezone"),
             "operator_location": snapshot.get("operator_location"),
         }
@@ -1461,24 +2169,35 @@ class ConciergeAdminAgent:
         ]
         try:
             async with httpx.AsyncClient(timeout=18.0) as client:
+                req_body = {
+                    "model": CONCIERGE_MODEL,
+                    "temperature": 0.2,
+                    "max_tokens": 1024,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "tools": self.OPENAI_TOOLS,
+                    "tool_choice": "auto",
+                    "messages": messages_payload,
+                }
                 resp = await client.post(
                     f"{CONCIERGE_OPENAI_URL.rstrip('/')}/chat/completions",
-                    json={
-                        "model": CONCIERGE_MODEL,
-                        "temperature": 0.2,
-                        "max_tokens": 1024,
-                        "chat_template_kwargs": {"enable_thinking": False},
-                        "messages": messages_payload,
-                    },
+                    json=req_body,
                 )
+                if resp.status_code == 400:
+                    req_body.pop("tools", None)
+                    req_body.pop("tool_choice", None)
+                    resp = await client.post(
+                        f"{CONCIERGE_OPENAI_URL.rstrip('/')}/chat/completions",
+                        json=req_body,
+                    )
                 if resp.status_code == 200:
                     data = resp.json()
                     choices = data.get("choices") or []
                     if choices:
-                        msg = choices[0].get("message") or {}
-                        content = msg.get("content") or msg.get("reasoning_content")
-                        if content:
-                            return content.strip()
+                        msg_obj = choices[0].get("message") or {}
+                        native_calls = self._extract_native_tool_calls(msg_obj)
+                        content = msg_obj.get("content") or msg_obj.get("reasoning_content")
+                        if content or native_calls:
+                            return (content.strip() if content else None), native_calls
         except Exception as exc:
             logger.warning("Concierge local LLM call failed (%s); checking NIM fallback.", exc)
 
@@ -1500,26 +2219,38 @@ class ConciergeAdminAgent:
             ).rstrip("/")
             if nim_key:
                 async with httpx.AsyncClient(timeout=22.0) as client:
+                    nim_body = {
+                        "model": nim_model,
+                        "temperature": 0.2,
+                        "max_tokens": 1024,
+                        "tools": self.OPENAI_TOOLS,
+                        "tool_choice": "auto",
+                        "messages": messages_payload,
+                    }
                     resp = await client.post(
                         f"{nim_base}/chat/completions",
                         headers={"Authorization": f"Bearer {nim_key}"},
-                        json={
-                            "model": nim_model,
-                            "temperature": 0.2,
-                            "max_tokens": 1024,
-                            "messages": messages_payload,
-                        },
+                        json=nim_body,
                     )
+                    if resp.status_code == 400:
+                        nim_body.pop("tools", None)
+                        nim_body.pop("tool_choice", None)
+                        resp = await client.post(
+                            f"{nim_base}/chat/completions",
+                            headers={"Authorization": f"Bearer {nim_key}"},
+                            json=nim_body,
+                        )
                     if resp.status_code == 200:
                         choices = resp.json().get("choices") or []
                         if choices:
-                            msg = choices[0].get("message") or {}
-                            content = msg.get("content") or msg.get("reasoning_content")
-                            if content:
-                                return content.strip()
+                            msg_obj = choices[0].get("message") or {}
+                            native_calls = self._extract_native_tool_calls(msg_obj)
+                            content = msg_obj.get("content") or msg_obj.get("reasoning_content")
+                            if content or native_calls:
+                                return (content.strip() if content else None), native_calls
         except Exception as exc:
             logger.warning("Concierge NVIDIA NIM fallback failed: %s", exc)
-        return None
+        return None, []
 
     def _format_deterministic_reply(
         self,

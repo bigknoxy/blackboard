@@ -10,9 +10,11 @@ Implements SOLID Principles:
 """
 
 import asyncio
+import html
 import logging
 import os
 import json
+import re
 import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -52,6 +54,18 @@ class BaseChannel(ABC):
     @abstractmethod
     async def send_hitl_notification(self, ticket: HITLTicketModel) -> Dict[str, Any]:
         """Send an interactive HITL approval card with inline decision buttons."""
+        pass
+
+    @abstractmethod
+    async def send_workflow_completed(
+        self,
+        workflow_id: str,
+        run_id: str,
+        summary: str,
+        status: str = "COMPLETED",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Send a formatted workflow completion summary notification."""
         pass
 
 
@@ -184,8 +198,6 @@ class TelegramChannel(BaseChannel):
         )
 
         cockpit_url = creds["cockpit_url"]
-        is_https = cockpit_url.startswith("https://")
-
         # Telegram inline keyboard buttons: Approve Once, Always Allow, Reject, WebApp
         keyboard = [
             [
@@ -201,13 +213,9 @@ class TelegramChannel(BaseChannel):
                     "text": "❌ Reject",
                     "callback_data": f"hitl:{ticket.id}:REJECTED:once",
                 },
-            ]
+            ],
+            self._cockpit_button_row(cockpit_url),
         ]
-
-        if is_https:
-            keyboard.append([{"text": "🌐 Open Web Cockpit", "web_app": {"url": cockpit_url}}])
-        else:
-            keyboard.append([{"text": "🌐 Open Web Cockpit", "url": cockpit_url}])
 
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
@@ -223,6 +231,60 @@ class TelegramChannel(BaseChannel):
                 return {"status": "DELIVERED", "http_code": res.status_code}
         except Exception as exc:
             logger.warning("Telegram send_hitl_notification failed: %s", exc)
+            return {"status": "ERROR", "error": str(exc)}
+
+    @staticmethod
+    def _cockpit_button_row(cockpit_url: str) -> List[Dict[str, Any]]:
+        """Build a Telegram inline keyboard row linking to the Web Cockpit."""
+        if cockpit_url.startswith("https://"):
+            return [{"text": "🌐 Open Web Cockpit", "web_app": {"url": cockpit_url}}]
+        return [{"text": "🌐 Open Web Cockpit", "url": cockpit_url}]
+
+    async def send_workflow_completed(
+        self,
+        workflow_id: str,
+        run_id: str,
+        summary: str,
+        status: str = "COMPLETED",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        creds = await self.get_credentials()
+        target_chat = (metadata or {}).get("chat_id") or creds["chat_id"]
+        if not creds["token"] or not target_chat or not creds["enabled"]:
+            return {"status": "SKIPPED", "reason": "not configured or disabled"}
+
+        icon = "✅" if status == "COMPLETED" else "⚠️"
+        md_text = (
+            f"{icon} **Workflow `{workflow_id}` {status}**\n"
+            f"Run: `{run_id[:8]}`\n\n"
+            f"{summary[:3200]}"
+        )
+        html_text = ChannelGateway._markdown_to_telegram_html(md_text)[:4000]
+        keyboard = [self._cockpit_button_row(creds["cockpit_url"])]
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                res = await client.post(
+                    f"https://api.telegram.org/bot{creds['token']}/sendMessage",
+                    json={
+                        "chat_id": target_chat,
+                        "text": html_text,
+                        "parse_mode": "HTML",
+                        "reply_markup": {"inline_keyboard": keyboard},
+                    },
+                )
+                if res.status_code != 200:
+                    res = await client.post(
+                        f"https://api.telegram.org/bot{creds['token']}/sendMessage",
+                        json={
+                            "chat_id": target_chat,
+                            "text": md_text[:4000],
+                            "reply_markup": {"inline_keyboard": keyboard},
+                        },
+                    )
+                return {"status": "DELIVERED", "http_code": res.status_code}
+        except Exception as exc:
+            logger.warning("Telegram send_workflow_completed failed: %s", exc)
             return {"status": "ERROR", "error": str(exc)}
 
     async def handle_callback_query(
@@ -337,28 +399,17 @@ class TelegramChannel(BaseChannel):
                 act_wf_id = tool_result.get("workflow_id")
                 act_yaml = (ticket.tool_arguments or {}).get("yaml_content")
                 if act_wf_id and act_yaml:
-                    existing_wf = await session.get(WorkflowModel, act_wf_id)
-                    parsed_g = workflow_engine.parse_yaml_to_graph(act_yaml)
-                    bpmn_x = workflow_engine.graph_to_bpmn_xml(act_wf_id, tool_result.get("workflow_name", act_wf_id), parsed_g)
-                    if existing_wf:
-                        existing_wf.name = tool_result.get("workflow_name", existing_wf.name)
-                        existing_wf.description = tool_result.get("description", existing_wf.description)
-                        existing_wf.state_graph = parsed_g
-                        existing_wf.yaml_source = act_yaml
-                        existing_wf.bpmn_xml = bpmn_x
-                    else:
-                        new_wf = WorkflowModel(
-                            id=act_wf_id,
-                            name=tool_result.get("workflow_name", act_wf_id),
-                            description=tool_result.get("description", "Architect-generated workflow"),
-                            state_graph=parsed_g,
-                            yaml_source=act_yaml,
-                            bpmn_xml=bpmn_x,
-                        )
-                        session.add(new_wf)
-                    await session.commit()
+                    await workflow_engine.upsert_workflow_from_yaml(
+                        session=session,
+                        workflow_id=act_wf_id,
+                        name=tool_result.get("workflow_name", act_wf_id),
+                        description=tool_result.get("description", "Architect-generated workflow"),
+                        yaml_content=act_yaml,
+                        source="workflow_activator_telegram",
+                    )
 
         # If policy graduation requested
+        policy_note = ""
         if decision == "APPROVED" and policy_mode == "tool" and ticket.tool_id:
             policy = ApprovalPolicyModel(
                 policy_type="tool",
@@ -370,6 +421,7 @@ class TelegramChannel(BaseChannel):
             )
             session.add(policy)
             await session.commit()
+            policy_note = f"\n• 🛡️ **Auto-Approval Policy Active:** Future `{ticket.tool_id}` calls for `@{ticket.agent_id}` in `{ticket.workflow_id}` will auto-approve."
 
         # If workflow user_task, advance or fail workflow
         if ticket.gate_type == "user_task":
@@ -391,11 +443,18 @@ class TelegramChannel(BaseChannel):
 
         # Update Telegram message & replace interactive buttons with confirmed badge
         status_icon = "✅" if decision == "APPROVED" else "❌"
+        result_preview = ""
+        if isinstance(tool_result, dict):
+            out = tool_result.get("stdout") or tool_result.get("output") or tool_result.get("message") or tool_result.get("status")
+            if out:
+                result_preview = f"\n• **Output:** `{str(out).strip()[:300]}`"
         updated_text = (
             f"{status_icon} *[Ticket {decision}]* Tool `{ticket.tool_id}`\n"
             f"• Decided by: `{reviewer_tag}` via Telegram\n"
             f"• Policy: `{policy_mode}`\n"
             f"• Resolved at: `{ticket.resolved_at.strftime('%Y-%m-%d %H:%M:%S UTC')}`"
+            f"{policy_note}"
+            f"{result_preview}"
         )
         resolved_keyboard = [
             [{"text": f"{status_icon} {decision} ({policy_mode})", "callback_data": "noop"}],
@@ -517,6 +576,45 @@ class DiscordChannel(BaseChannel):
             logger.warning("Discord send_hitl_notification failed: %s", exc)
             return {"status": "ERROR", "error": str(exc)}
 
+    async def send_workflow_completed(
+        self,
+        workflow_id: str,
+        run_id: str,
+        summary: str,
+        status: str = "COMPLETED",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        creds = await self.get_credentials()
+        if not creds["webhook"] or not creds["enabled"]:
+            return {"status": "SKIPPED", "reason": "not configured or disabled"}
+
+        is_ok = status == "COMPLETED"
+        embed = {
+            "title": f"{'✅' if is_ok else '⚠️'} Workflow {status}: {workflow_id}",
+            "description": summary[:3800],
+            "color": 0x10B981 if is_ok else 0xEF4444,
+            "fields": [
+                {"name": "Workflow", "value": f"`{workflow_id}`", "inline": True},
+                {"name": "Run ID", "value": f"`{run_id[:8]}`", "inline": True},
+            ],
+            "footer": {"text": "Blackboard Workflow Engine"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                res = await client.post(
+                    creds["webhook"],
+                    json={
+                        "content": f"{'✅' if is_ok else '⚠️'} **[Blackboard]** Workflow `{workflow_id}` finished ({status}).",
+                        "embeds": [embed],
+                    },
+                )
+                return {"status": "DELIVERED", "http_code": res.status_code}
+        except Exception as exc:
+            logger.warning("Discord send_workflow_completed failed: %s", exc)
+            return {"status": "ERROR", "error": str(exc)}
+
 
 class ChannelGateway:
     """
@@ -527,8 +625,16 @@ class ChannelGateway:
     def __init__(self):
         self.telegram = TelegramChannel()
         self.discord = DiscordChannel()
+        self._channels: Dict[str, BaseChannel] = {
+            "telegram": self.telegram,
+            "discord": self.discord,
+        }
         self._polling_running = True
         self._polling_task: Optional[asyncio.Task] = None
+
+    def register_channel(self, name: str, channel: BaseChannel) -> None:
+        """Register an external BaseChannel implementation (Open/Closed Principle)."""
+        self._channels[name] = channel
 
     def stop_telegram_polling(self) -> None:
         """Signal background polling loop to terminate immediately without waiting on long-poll."""
@@ -583,19 +689,46 @@ class ChannelGateway:
 
         return await self.get_status()
 
-    async def notify_text(self, text: str) -> Dict[str, Any]:
-        """Broadcast text to all configured external channels."""
-        results = {}
-        results["telegram"] = await self.telegram.send_text(text)
-        results["discord"] = await self.discord.send_text(text)
+    async def _broadcast(self, method_name: str, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Dispatch a BaseChannel method uniformly across all registered channels."""
+        results: Dict[str, Any] = {}
+        for name, channel in self._channels.items():
+            try:
+                results[name] = await getattr(channel, method_name)(*args, **kwargs)
+            except Exception as exc:
+                logger.warning("Channel %s %s error: %s", name, method_name, exc)
+                results[name] = {"status": "ERROR", "error": str(exc)}
         return results
 
+    async def notify_text(self, text: str) -> Dict[str, Any]:
+        """Broadcast text to all configured external channels."""
+        return await self._broadcast("send_text", text)
+
     async def notify_hitl_ticket(self, ticket: HITLTicketModel) -> Dict[str, Any]:
-        """Send rich interactive HITL ticket notification to Telegram (with buttons) and Discord (with embed)."""
-        results = {}
-        results["telegram"] = await self.telegram.send_hitl_notification(ticket)
-        results["discord"] = await self.discord.send_hitl_notification(ticket)
-        return results
+        """Send rich interactive HITL ticket notification to all registered channels."""
+        return await self._broadcast("send_hitl_notification", ticket)
+
+    async def notify_workflow_completed(
+        self,
+        workflow_id: str,
+        run_id: str,
+        summary: str,
+        status: str = "COMPLETED",
+        origin_channel: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Channel-agnostic workflow completion dispatch across all registered channels."""
+        meta = dict(metadata or {})
+        if origin_channel:
+            meta["origin_channel"] = origin_channel
+        return await self._broadcast(
+            "send_workflow_completed",
+            workflow_id=workflow_id,
+            run_id=run_id,
+            summary=summary,
+            status=status,
+            metadata=meta,
+        )
 
     async def process_telegram_webhook(
         self, request_data: Dict[str, Any], session: AsyncSession
@@ -620,6 +753,8 @@ class ChannelGateway:
         from_user = message.get("from", {}).get("username") or str(
             message.get("from", {}).get("id", "operator")
         )
+        reply_obj = message.get("reply_to_message") or {}
+        reply_quote = str(reply_obj.get("text") or reply_obj.get("caption") or "").strip()
 
         if not text or not chat_id:
             return {"status": "ok", "reason": "empty_message"}
@@ -779,12 +914,18 @@ class ChannelGateway:
         except Exception as e:
             logger.debug("Could not load Telegram chat history: %s", e)
 
+        concierge_input = (
+            f"[Replying to previous message: \"{reply_quote[:400]}\"]\n{text}"
+            if reply_quote
+            else text
+        )
+
         # Default: Route to Concierge Admin Agent
         async with self.telegram.typing_indicator(token=token, chat_id=chat_id):
             concierge_res = await concierge_agent.handle_chat(
                 session,
                 ConciergeChatRequest(
-                    message=text,
+                    message=concierge_input,
                     workflow_id="code_review_pipeline",
                     history=history,
                 ),
@@ -794,7 +935,7 @@ class ChannelGateway:
 
         # Update conversation history in Redis
         try:
-            history.append({"role": "user", "content": text})
+            history.append({"role": "user", "content": concierge_input})
             history.append({"role": "assistant", "content": full_text})
             history = history[-10:]
             redis_client = await get_redis()
@@ -812,17 +953,48 @@ class ChannelGateway:
                 chunks = [full_text[i:i + 3800] for i in range(0, max(1, len(full_text)), 3800)]
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     for chunk in chunks:
-                        await client.post(
+                        formatted_html = self._markdown_to_telegram_html(chunk)
+                        resp = await client.post(
                             f"https://api.telegram.org/bot{token}/sendMessage",
                             json={
                                 "chat_id": chat_id,
-                                "text": chunk,
+                                "text": formatted_html,
+                                "parse_mode": "HTML",
                             },
                         )
+                        if resp.status_code != 200:
+                            await client.post(
+                                f"https://api.telegram.org/bot{token}/sendMessage",
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": chunk,
+                                },
+                            )
             except Exception as e:
                 logger.warning("Telegram chat reply failed: %s", e)
 
         return {"status": "ok", "reply": concierge_res.reply}
+
+    @staticmethod
+    def _markdown_to_telegram_html(text: str) -> str:
+        """Convert Markdown (**bold**, `code`, ```blocks```, ### headings) to safe Telegram HTML."""
+        if not text:
+            return ""
+        escaped = html.escape(text, quote=False)
+
+        # Fenced code blocks ```lang\n...\n```
+        escaped = re.sub(
+            r"```(?:[a-zA-Z0-9_+-]*)\n([\s\S]*?)```",
+            lambda m: f"<pre><code>{m.group(1).strip()}</code></pre>",
+            escaped,
+        )
+        # Inline code `...`
+        escaped = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", escaped)
+        # Markdown headings ### Title -> <b>Title</b>
+        escaped = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", escaped)
+        # Bold **text**
+        escaped = re.sub(r"\*\*([^\n*]+?)\*\*", r"<b>\1</b>", escaped)
+        return escaped
 
     async def start_telegram_polling(self) -> None:
         """
@@ -882,12 +1054,17 @@ class ChannelGateway:
                                 logger.info("Processing inbound Telegram update: update_id=%s", update_id)
                                 asyncio.create_task(self._process_single_telegram_update(update))
                         else:
+                            logger.warning(
+                                "Telegram getUpdates returned HTTP %s: %s",
+                                resp.status_code,
+                                (resp.text or "")[:300],
+                            )
                             await asyncio.sleep(2)
                     except asyncio.CancelledError:
                         logger.info("Telegram background polling cancelled.")
                         break
                     except Exception as exc:
-                        logger.debug("Telegram polling transient exception: %s", exc)
+                        logger.warning("Telegram polling transient exception: %s", exc)
                         await asyncio.sleep(2)
         except asyncio.CancelledError:
             pass
@@ -900,6 +1077,26 @@ class ChannelGateway:
                 await self.process_telegram_webhook(update, session)
             except Exception as e:
                 logger.warning("Error processing telegram update %s: %s", update.get("update_id"), e)
+                chat_id = (
+                    (update.get("message") or {}).get("chat", {}).get("id")
+                    or (update.get("callback_query") or {}).get("message", {}).get("chat", {}).get("id")
+                )
+                if chat_id:
+                    try:
+                        creds = await self.telegram.get_credentials()
+                        token = creds.get("token")
+                        if token:
+                            err_summary = str(e).strip()[:200] or type(e).__name__
+                            async with httpx.AsyncClient(timeout=5.0) as client:
+                                await client.post(
+                                    f"https://api.telegram.org/bot{token}/sendMessage",
+                                    json={
+                                        "chat_id": chat_id,
+                                        "text": f"⚠️ Request failed ({err_summary}). Please try again or check control-plane logs.",
+                                    },
+                                )
+                    except Exception as send_exc:
+                        logger.warning("Failed to send Telegram fallback error reply: %s", send_exc)
 
 
 # Singleton Instance

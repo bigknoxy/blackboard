@@ -32,6 +32,8 @@ export default function ConciergeChat({
   const [nimKeyInput, setNimKeyInput] = useState("");
   const [nimModelInput, setNimModelInput] = useState("meta/llama-3.3-70b-instruct");
   const [preferLocal, setPreferLocal] = useState(true);
+  const [decisionEnabled, setDecisionEnabled] = useState(true);
+  const [decisionProvider, setDecisionProvider] = useState("local");
   const [savingNim, setSavingNim] = useState(false);
   const [channelStatus, setChannelStatus] = useState(null);
   const [tgTokenInput, setTgTokenInput] = useState("");
@@ -69,6 +71,12 @@ export default function ConciergeChat({
         }
         if (typeof st?.prefer_local === "boolean") {
           setPreferLocal(st.prefer_local);
+        }
+        if (typeof st?.decision_model?.enabled === "boolean") {
+          setDecisionEnabled(st.decision_model.enabled);
+        }
+        if (st?.decision_model?.provider) {
+          setDecisionProvider(st.decision_model.provider);
         }
       }
     } catch {
@@ -127,6 +135,8 @@ export default function ConciergeChat({
       const payload = {
         default_nim_model: nimModelInput,
         prefer_local: preferLocal,
+        decision_model_enabled: decisionEnabled,
+        decision_model_provider: decisionProvider,
       };
       if (nimKeyInput.trim()) {
         payload.nvidia_nim_api_key = nimKeyInput.trim();
@@ -138,6 +148,30 @@ export default function ConciergeChat({
       // ignore
     } finally {
       setSavingNim(false);
+    }
+  }
+
+  async function handleToggleDecisionEnabled() {
+    const next = !decisionEnabled;
+    setDecisionEnabled(next);
+    if (!api.updateLlmConfig) return;
+    try {
+      const updated = await api.updateLlmConfig({ decision_model_enabled: next });
+      setLlmStatus(updated);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleToggleDecisionProvider() {
+    const next = decisionProvider === "local" ? "gemini" : "local";
+    setDecisionProvider(next);
+    if (!api.updateLlmConfig) return;
+    try {
+      const updated = await api.updateLlmConfig({ decision_model_provider: next });
+      setLlmStatus(updated);
+    } catch {
+      // ignore
     }
   }
 
@@ -688,6 +722,28 @@ export default function ConciergeChat({
                 className="min-h-[44px] min-w-[44px] px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs font-mono text-slate-200"
               >
                 {preferLocal ? "Mode: Local First" : "Mode: NIM First"}
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleToggleDecisionEnabled}
+                aria-label="Toggle Decision Model"
+                className={`min-h-[44px] min-w-[44px] flex-1 px-3 py-2 border rounded-lg text-xs font-mono transition ${
+                  decisionEnabled
+                    ? "bg-emerald-950/60 border-emerald-700 text-emerald-300"
+                    : "bg-slate-950 border-slate-700 text-slate-400"
+                }`}
+              >
+                Decision Model: {decisionEnabled ? "ON" : "OFF"}
+              </button>
+              <button
+                type="button"
+                onClick={handleToggleDecisionProvider}
+                aria-label="Toggle Decision Provider"
+                className="min-h-[44px] min-w-[44px] flex-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs font-mono text-cyan-300"
+              >
+                Provider: {decisionProvider}
               </button>
             </div>
             <div className="flex gap-2">
