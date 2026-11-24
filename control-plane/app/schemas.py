@@ -226,6 +226,7 @@ class WorkflowNode(BaseModel):
         "StartEvent",
         "EndEvent",
         "ServiceTask",
+        "VerificationTask",
         "ParallelGateway",
         "ExclusiveGateway",
         "UserTask",
@@ -234,6 +235,8 @@ class WorkflowNode(BaseModel):
     entry_type: Optional[EntryTypeLiteral] = "spec"
     prompt_template: Optional[str] = None
     condition_expression: Optional[str] = None
+    verify_command: Optional[str] = None
+    max_iterations: Optional[int] = 3
 
 
 class WorkflowEdge(BaseModel):
@@ -300,6 +303,7 @@ class WorkflowRunResponse(BaseModel):
 class HITLDecisionRequest(BaseModel):
     decision: Literal["APPROVED", "REJECTED"]
     reviewer_comment: Optional[str] = None
+    reviewer_id: Optional[str] = None
     auto_approve_policy: Optional[Literal["tool", "command_pattern", "workflow_node"]] = None
     pattern: Optional[str] = None
 
@@ -346,6 +350,7 @@ class HITLTicketResponse(BaseModel):
     tool_arguments: Dict[str, Any]
     status: str
     reviewer_comment: Optional[str] = None
+    reviewer_id: Optional[str] = None
     execution_result: Optional[Dict[str, Any]] = None
     created_at: datetime
     resolved_at: Optional[datetime] = None
@@ -373,6 +378,10 @@ class LLMRouterConfigRequest(BaseModel):
     nim_max_rpm: Optional[int] = Field(default=None, ge=1, le=600)
     prefer_local: Optional[bool] = None
     clear_cooldowns: bool = False
+    decision_model_enabled: Optional[bool] = None
+    decision_model_provider: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    gemini_decision_model: Optional[str] = None
 
 
 # --- External Chat Bridge Schemas (Telegram / Discord / Webhook) ---

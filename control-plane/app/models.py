@@ -289,6 +289,7 @@ class HITLTicketModel(Base):
         String(32), nullable=False, default="PENDING", index=True
     )  # PENDING | APPROVED | REJECTED
     reviewer_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reviewer_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     execution_result: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB, nullable=True
     )

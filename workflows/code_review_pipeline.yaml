@@ -35,6 +35,20 @@ nodes:
       Implement production-ready Python/React code conforming strictly to the Blackboard
       specification and hydrated `<prior_experience>` memories.
 
+  - id: stage_deterministic_tests
+    name: Deterministic Test Suite Gate
+    type: VerificationTask
+    agent_id: qa-tester
+    entry_type: test_result
+    verify_command: "pytest tests/unit/ -q --tb=short"
+    max_iterations: 3
+    timeout: 60
+    trusted_command: true
+
+  - id: gateway_deterministic_gate
+    name: Deterministic Tests Passed?
+    type: ExclusiveGateway
+
   - id: gateway_fork_qa_sec
     name: Parallel Verification Fork
     type: ParallelGateway
@@ -89,7 +103,18 @@ edges:
     target: stage_code
   - id: flow_4
     source: stage_code
+    target: stage_deterministic_tests
+  - id: flow_4_gate
+    source: stage_deterministic_tests
+    target: gateway_deterministic_gate
+  - id: flow_4_rework
+    source: gateway_deterministic_gate
+    target: stage_code
+    condition: REWORK
+  - id: flow_4_pass
+    source: gateway_deterministic_gate
     target: gateway_fork_qa_sec
+    condition: PASS
   - id: flow_5a
     source: gateway_fork_qa_sec
     target: stage_test

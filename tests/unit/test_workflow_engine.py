@@ -8,6 +8,8 @@ def test_yaml_to_bpmn_and_back_roundtrip():
         / "workflows"
         / "code_review_pipeline.yaml"
     )
+    if not yaml_path.exists():
+        yaml_path = Path("/workflows/code_review_pipeline.yaml")
     raw_yaml = yaml_path.read_text(encoding="utf-8")
     parsed = workflow_engine.parse_yaml_to_graph(raw_yaml)
 

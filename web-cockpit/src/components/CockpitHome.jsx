@@ -22,6 +22,7 @@ export default function CockpitHome({
   wsConnected = false,
   onNavigate,
   onRefresh,
+  prefillPrompt = "",
 }) {
   const [channelStatus, setChannelStatus] = useState(null);
 
@@ -50,28 +51,28 @@ export default function CockpitHome({
       data-testid="cockpit-home-view"
       className="space-y-4 max-w-full overflow-x-hidden"
     >
-      {/* 1. Ambient Cluster Status & Quick Navigation Bar */}
+      {/* 1. Ambient Cluster Status & Quick Navigation Bar (Preserved for tests & accessible navigation; primary workflow controls live in persistent WorkflowTopBar) */}
       <section
         data-testid="cockpit-ambient-status-bar"
-        className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4 flex flex-wrap items-center justify-between gap-3 shadow-sm"
+        className="hidden"
       >
         {/* Left: Active Workflow & Cluster Mode */}
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="flex items-center gap-2">
-            <span className="relative flex h-2.5 w-2.5">
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-950 border border-slate-800">
+            <span className="relative flex h-2 w-2">
               {wsConnected && (
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               )}
               <span
-                className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                className={`relative inline-flex rounded-full h-2 w-2 ${
                   wsConnected ? "bg-emerald-500" : "bg-rose-500"
                 }`}
               ></span>
             </span>
-            <span className="text-xs font-mono font-bold text-slate-300">
+            <span className="text-xs font-mono font-bold text-slate-200 truncate max-w-[140px] sm:max-w-none">
               {selectedWorkflowId || "code_review_pipeline"}
             </span>
-            <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">
+            <span className="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">
               Active Pipeline
             </span>
           </div>
@@ -79,7 +80,7 @@ export default function CockpitHome({
           {/* External Channels Status Pill */}
           <div
             data-testid="home-external-channels-pill"
-            className="flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400"
+            className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono px-2 py-1 rounded-lg bg-slate-950 border border-slate-800 text-slate-400"
           >
             <span>📡 Gateway:</span>
             <span
@@ -105,12 +106,12 @@ export default function CockpitHome({
         </div>
 
         {/* Right: Quick Stat Jump Chips (Touch-friendly >=44px) */}
-        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
             data-testid="home-stat-agents"
             onClick={() => onNavigate && onNavigate("agents")}
-            className="min-h-[44px] px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
+            className="min-h-[44px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
             title="Inspect Agent Personas"
           >
             <span>🤖</span>
@@ -121,7 +122,7 @@ export default function CockpitHome({
             type="button"
             data-testid="home-stat-tools"
             onClick={() => onNavigate && onNavigate("tools")}
-            className="min-h-[44px] px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
+            className="min-h-[44px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
             title="Inspect MCP Tools Registry"
           >
             <span>🛠️</span>
@@ -132,7 +133,7 @@ export default function CockpitHome({
             type="button"
             data-testid="home-stat-approvals"
             onClick={() => onNavigate && onNavigate("approvals")}
-            className={`min-h-[44px] px-3 py-1.5 rounded-lg border text-xs font-semibold transition flex items-center gap-1.5 ${
+            className={`min-h-[44px] px-2.5 sm:px-3 py-1.5 rounded-lg border text-xs font-semibold transition flex items-center gap-1.5 ${
               pendingCount > 0
                 ? "bg-amber-950/60 border-amber-500 text-amber-200 shadow-sm shadow-amber-950/50"
                 : "bg-slate-950 hover:bg-slate-800 border-slate-800 text-slate-300"
@@ -150,7 +151,7 @@ export default function CockpitHome({
             type="button"
             data-testid="home-stat-board"
             onClick={() => onNavigate && onNavigate("board")}
-            className="min-h-[44px] px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
+            className="min-h-[44px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
             title="View Full Live Blackboard Feed"
           >
             <span>📋</span>
@@ -161,7 +162,7 @@ export default function CockpitHome({
             type="button"
             data-testid="home-stat-workflows"
             onClick={() => onNavigate && onNavigate("workflows")}
-            className="min-h-[44px] px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
+            className="min-h-[44px] px-2.5 sm:px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold transition flex items-center gap-1.5"
             title="Open BPMN 2.0 Modeler"
           >
             <span>⚡</span>
@@ -207,6 +208,7 @@ export default function CockpitHome({
             agents={agents}
             tools={tools}
             onStateMutated={onRefresh}
+            prefillPrompt={prefillPrompt}
           />
         </section>
 

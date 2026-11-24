@@ -159,10 +159,10 @@ export const api = {
     }),
 
   // Concierge Admin Agent
-  chatConcierge: (message, workflowId) =>
+  chatConcierge: (message, workflowId, history = []) =>
     request("/chat", {
       method: "POST",
-      body: JSON.stringify({ message, workflow_id: workflowId }),
+      body: JSON.stringify({ message, workflow_id: workflowId, history }),
     }),
 
   // Multi-Tier LLM Router & NVIDIA NIM Gateway

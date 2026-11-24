@@ -832,6 +832,8 @@ async def create_workflow(
     elif bpmn_xml:
         state_graph = workflow_engine.bpmn_xml_to_graph(bpmn_xml)
 
+    state_graph = workflow_engine.ensure_lifecycle_events(state_graph)
+
     if not yaml_source:
         yaml_source = workflow_engine.graph_to_yaml(
             payload.id, payload.name, payload.description, state_graph
@@ -852,6 +854,14 @@ async def create_workflow(
     session.add(wf)
     await session.commit()
     await session.refresh(wf)
+    await workflow_engine._publish_event(
+        {
+            "event": "workflow.created",
+            "workflow_id": wf.id,
+            "name": wf.name,
+            "source": "api",
+        }
+    )
     return wf
 
 
@@ -899,6 +909,9 @@ async def update_workflow(
         )
     elif payload.state_graph is not None:
         wf.state_graph = payload.state_graph.model_dump()
+
+    if wf.state_graph:
+        wf.state_graph = workflow_engine.ensure_lifecycle_events(wf.state_graph)
         wf.yaml_source = workflow_engine.graph_to_yaml(
             wf.id, wf.name, wf.description, wf.state_graph
         )
@@ -908,6 +921,14 @@ async def update_workflow(
 
     await session.commit()
     await session.refresh(wf)
+    await workflow_engine._publish_event(
+        {
+            "event": "workflow.updated",
+            "workflow_id": wf.id,
+            "name": wf.name,
+            "source": "api",
+        }
+    )
     return wf
 
 
@@ -1019,7 +1040,7 @@ async def list_blackboard_entries(
     stmt = select(BlackboardEntryModel).order_by(
         BlackboardEntryModel.created_at.desc()
     )
-    if workflow_id:
+    if workflow_id and workflow_id.lower() not in ("all", "none", "*", ""):
         stmt = stmt.where(BlackboardEntryModel.workflow_id == workflow_id)
     if entry_type:
         stmt = stmt.where(BlackboardEntryModel.entry_type == entry_type)
@@ -1349,6 +1370,8 @@ async def decide_hitl_ticket(
 
     ticket.status = payload.decision
     ticket.reviewer_comment = payload.reviewer_comment
+    if payload.reviewer_id:
+        ticket.reviewer_id = payload.reviewer_id
     ticket.resolved_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(ticket)
@@ -1394,26 +1417,14 @@ async def decide_hitl_ticket(
                 act_wf_id = tool_result.get("workflow_id")
                 act_yaml = (ticket.tool_arguments or {}).get("yaml_content")
                 if act_wf_id and act_yaml:
-                    existing_wf = await session.get(WorkflowModel, act_wf_id)
-                    parsed_g = workflow_engine.parse_yaml_to_graph(act_yaml)
-                    bpmn_x = workflow_engine.graph_to_bpmn_xml(act_wf_id, tool_result.get("workflow_name", act_wf_id), parsed_g)
-                    if existing_wf:
-                        existing_wf.name = tool_result.get("workflow_name", existing_wf.name)
-                        existing_wf.description = tool_result.get("description", existing_wf.description)
-                        existing_wf.state_graph = parsed_g
-                        existing_wf.yaml_source = act_yaml
-                        existing_wf.bpmn_xml = bpmn_x
-                    else:
-                        new_wf = WorkflowModel(
-                            id=act_wf_id,
-                            name=tool_result.get("workflow_name", act_wf_id),
-                            description=tool_result.get("description", "Architect-generated workflow"),
-                            state_graph=parsed_g,
-                            yaml_source=act_yaml,
-                            bpmn_xml=bpmn_x,
-                        )
-                        session.add(new_wf)
-                    await session.commit()
+                    await workflow_engine.upsert_workflow_from_yaml(
+                        session=session,
+                        workflow_id=act_wf_id,
+                        name=tool_result.get("workflow_name", act_wf_id),
+                        description=tool_result.get("description", "Architect-generated workflow"),
+                        yaml_content=act_yaml,
+                        source="workflow_activator",
+                    )
 
     # If this was a workflow UserTask gate, advance the workflow run
     if ticket.gate_type == "user_task":
@@ -1663,6 +1674,44 @@ async def get_llm_router_status() -> Dict[str, Any]:
     except Exception:
         pass
 
+    r_dec_en = await redis_client.get("llm:decision:enabled")
+    env_dec_en = os.getenv("DECISION_MODEL_ENABLED", "true").lower() not in ("false", "0", "no")
+    decision_enabled = (
+        env_dec_en
+        if r_dec_en is None
+        else str(r_dec_en).lower() not in ("false", "0", "no")
+    )
+    r_dec_prov = await redis_client.get("llm:decision:provider")
+    decision_provider = (
+        (r_dec_prov or os.getenv("DECISION_MODEL_PROVIDER", "local")).strip().lower()
+    )
+    if decision_provider not in ("local", "gemini"):
+        decision_provider = "local"
+    r_gem_key = await redis_client.get("llm:decision:gemini_api_key")
+    effective_gem_key = (r_gem_key or os.getenv("GEMINI_API_KEY", "")).strip()
+    r_gem_model = await redis_client.get("llm:decision:gemini_model")
+    gemini_model = (
+        r_gem_model or os.getenv("GEMINI_DECISION_MODEL", "gemini-decision-1")
+    ).strip()
+
+    classifier_url = (
+        os.getenv("CLASSIFIER_OPENAI_URL")
+        or os.getenv("LAN_CT118_LFM_URL")
+        or os.getenv("LAN_LAPTOP_LFM_URL")
+        or "http://192.168.8.180:8090/v1"
+    )
+    laptop_lfm_url = os.getenv("LAN_LAPTOP_LFM_URL") or "http://192.168.8.149:8090/v1"
+    concierge_url = (
+        os.getenv("CONCIERGE_OPENAI_URL")
+        or os.getenv("LAN_CT118_QWEN_URL")
+        or os.getenv("LAN_LAPTOP_QWEN_URL")
+        or "http://192.168.8.180:8081/v1"
+    )
+    local_decision_endpoints: List[str] = []
+    for ep in (classifier_url, laptop_lfm_url, concierge_url):
+        if ep and ep not in local_decision_endpoints:
+            local_decision_endpoints.append(ep)
+
     return {
         "strategy": (
             "local_first_with_nim_failover"
@@ -1670,6 +1719,13 @@ async def get_llm_router_status() -> Dict[str, Any]:
             else "nim_first_with_local_failover"
         ),
         "prefer_local": prefer_local,
+        "decision_model": {
+            "enabled": decision_enabled,
+            "provider": decision_provider,
+            "gemini_api_key_configured": bool(effective_gem_key),
+            "gemini_model": gemini_model,
+            "local_endpoints": local_decision_endpoints,
+        },
         "nvidia_nim": {
             "base_url": os.getenv(
                 "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"
@@ -1684,7 +1740,7 @@ async def get_llm_router_status() -> Dict[str, Any]:
         "local_cluster": {
             "ollama": {
                 "url": os.getenv(
-                    "LOCAL_OLLAMA_URL", "http://192.168.1.150:11434"
+                    "LOCAL_OLLAMA_URL", "http://192.168.8.136:11434"
                 ),
                 "models": [
                     "qwen2.5-coder:0.5b",
@@ -1698,34 +1754,34 @@ async def get_llm_router_status() -> Dict[str, Any]:
             },
             "ct118": [
                 {
-                    "url": "http://192.168.1.180:8080/v1",
+                    "url": os.getenv("LAN_CT118_GROOT_URL", "http://192.168.8.180:8080/v1"),
                     "model": "groot-19b",
                     "provider": "openai",
                 },
                 {
-                    "url": "http://192.168.1.180:8081/v1",
+                    "url": os.getenv("LAN_CT118_QWEN_URL", "http://192.168.8.180:8081/v1"),
                     "model": "qwen3-4b",
                     "provider": "openai",
                 },
                 {
-                    "url": "http://192.168.1.180:8090/v1",
+                    "url": os.getenv("LAN_CT118_LFM_URL", "http://192.168.8.180:8090/v1"),
                     "model": "lfm3-1.7b",
                     "provider": "openai",
                 },
             ],
             "laptop": [
                 {
-                    "url": "http://192.168.1.149:8080/v1",
+                    "url": os.getenv("LAN_LAPTOP_MISTRAL_URL", "http://192.168.8.149:8080/v1"),
                     "model": "mistral-24b",
                     "provider": "openai",
                 },
                 {
-                    "url": "http://192.168.1.149:8081/v1",
+                    "url": os.getenv("LAN_LAPTOP_QWEN_URL", "http://192.168.8.149:8081/v1"),
                     "model": "qwen3-4b",
                     "provider": "openai",
                 },
                 {
-                    "url": "http://192.168.1.149:8090/v1",
+                    "url": os.getenv("LAN_LAPTOP_LFM_URL", "http://192.168.8.149:8090/v1"),
                     "model": "lfm3-1.7b",
                     "provider": "openai",
                 },
@@ -1758,11 +1814,33 @@ async def update_llm_router_config(
             "llm:config:prefer_local",
             "true" if payload.prefer_local else "false",
         )
+    if payload.decision_model_enabled is not None:
+        await redis_client.set(
+            "llm:decision:enabled",
+            "true" if payload.decision_model_enabled else "false",
+        )
+    if payload.decision_model_provider is not None:
+        prov = payload.decision_model_provider.strip().lower()
+        if prov not in ("local", "gemini"):
+            raise HTTPException(
+                status_code=422,
+                detail="decision_model_provider must be 'local' or 'gemini'",
+            )
+        await redis_client.set("llm:decision:provider", prov)
+    if payload.gemini_api_key is not None:
+        await redis_client.set(
+            "llm:decision:gemini_api_key", payload.gemini_api_key.strip()
+        )
+    if payload.gemini_decision_model is not None:
+        await redis_client.set(
+            "llm:decision:gemini_model", payload.gemini_decision_model.strip()
+        )
     if payload.clear_cooldowns and hasattr(redis_client, "keys"):
         cd_keys = await redis_client.keys("llm:cooldown:*")
         for k in cd_keys:
             await redis_client.delete(k)
 
+    concierge_agent.invalidate_state_cache()
     return await get_llm_router_status()
 
 

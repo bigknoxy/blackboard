@@ -6,16 +6,23 @@ export default function ConciergeChat({
   agents = [],
   tools = [],
   onStateMutated,
+  prefillPrompt = "",
 }) {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
       content:
-        "Concierge Admin Agent online. Ask me to inspect platform state, inject steering (`steer: enforce strict typing`), trigger a workflow (`run workflow`), or prune the Blackboard (`prune blackboard`).",
+        "✨ **Concierge Admin & System Architect Online**\n\nI can dynamically create, update, or verify any part of the system for you:\n\n• ⚡ **Workflows** — Design or update pipelines with automated Architect synthesis & Security verification\n• 🛠️ **Tools & Skills** — Add or synthesize executable tools, shell capabilities, and specialized skills with safety verification\n• 🤖 **Agent Personas** — Spawn or tune agents with custom models, system prompts, and tool RBAC\n• 🛡️ **Autonomous Trust Policies** — Automate approvals and configure trust rules\n• 📊 **Platform Telemetry** — Inspect live system state, vector memories, and debate history\n\nWhat would you like to build or modify first?",
     },
   ]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(prefillPrompt || "");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (prefillPrompt) {
+      setInput(prefillPrompt);
+    }
+  }, [prefillPrompt]);
   const [selectedAgentId, setSelectedAgentId] = useState(
     agents[0]?.id || "architect"
   );
@@ -25,6 +32,8 @@ export default function ConciergeChat({
   const [nimKeyInput, setNimKeyInput] = useState("");
   const [nimModelInput, setNimModelInput] = useState("meta/llama-3.3-70b-instruct");
   const [preferLocal, setPreferLocal] = useState(true);
+  const [decisionEnabled, setDecisionEnabled] = useState(true);
+  const [decisionProvider, setDecisionProvider] = useState("local");
   const [savingNim, setSavingNim] = useState(false);
   const [channelStatus, setChannelStatus] = useState(null);
   const [tgTokenInput, setTgTokenInput] = useState("");
@@ -62,6 +71,12 @@ export default function ConciergeChat({
         }
         if (typeof st?.prefer_local === "boolean") {
           setPreferLocal(st.prefer_local);
+        }
+        if (typeof st?.decision_model?.enabled === "boolean") {
+          setDecisionEnabled(st.decision_model.enabled);
+        }
+        if (st?.decision_model?.provider) {
+          setDecisionProvider(st.decision_model.provider);
         }
       }
     } catch {
@@ -120,6 +135,8 @@ export default function ConciergeChat({
       const payload = {
         default_nim_model: nimModelInput,
         prefer_local: preferLocal,
+        decision_model_enabled: decisionEnabled,
+        decision_model_provider: decisionProvider,
       };
       if (nimKeyInput.trim()) {
         payload.nvidia_nim_api_key = nimKeyInput.trim();
@@ -134,6 +151,30 @@ export default function ConciergeChat({
     }
   }
 
+  async function handleToggleDecisionEnabled() {
+    const next = !decisionEnabled;
+    setDecisionEnabled(next);
+    if (!api.updateLlmConfig) return;
+    try {
+      const updated = await api.updateLlmConfig({ decision_model_enabled: next });
+      setLlmStatus(updated);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleToggleDecisionProvider() {
+    const next = decisionProvider === "local" ? "gemini" : "local";
+    setDecisionProvider(next);
+    if (!api.updateLlmConfig) return;
+    try {
+      const updated = await api.updateLlmConfig({ decision_model_provider: next });
+      setLlmStatus(updated);
+    } catch {
+      // ignore
+    }
+  }
+
   async function handleClearCooldowns() {
     if (!api.updateLlmConfig) return;
     const updated = await api.updateLlmConfig({ clear_cooldowns: true });
@@ -144,11 +185,15 @@ export default function ConciergeChat({
     e.preventDefault();
     if (!input.trim()) return;
     const userText = input.trim();
+    const historyPayload = messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setInput("");
     setLoading(true);
     try {
-      const res = await api.chatConcierge(userText, selectedWorkflowId);
+      const res = await api.chatConcierge(userText, selectedWorkflowId, historyPayload);
       setMessages((prev) => [
         ...prev,
         {
@@ -182,13 +227,42 @@ export default function ConciergeChat({
     >
       {/* Mobile-Keyboard-Aware (dvh) Concierge Chat Card */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col flex-1 min-h-[380px] max-h-[75dvh]">
-        <div className="pb-3 border-b border-slate-800">
-          <h2 className="text-base font-semibold text-white">
-            Concierge Admin Agent (<code>/api/v1/chat</code>)
-          </h2>
-          <p className="text-xs text-slate-400">
-            Keyboard-aware <code>dvh</code> viewport &amp; meta-tool console
-          </p>
+        <div className="pb-3 border-b border-slate-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="relative flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 shadow-md shadow-indigo-950/50 text-white font-bold text-lg">
+              <span>✨</span>
+              <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 border-2 border-slate-900"></span>
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm sm:text-base font-bold text-white tracking-tight">
+                  Concierge Admin &amp; System Architect
+                </h2>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold uppercase tracking-wider bg-indigo-950 text-indigo-300 border border-indigo-800">
+                  /api/v1/chat
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Dynamic Workflow &amp; Tool Synthesis &bull; Auto-Verification &bull; Meta-Orchestrator
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setMessages([
+                {
+                  role: "assistant",
+                  content:
+                    "✨ **Concierge Admin & System Architect Online**\n\nI can dynamically create, update, or verify any part of the system for you:\n\n• ⚡ **Workflows** — Design or update pipelines with automated Architect synthesis & Security verification\n• 🛠️ **Tools & Skills** — Add or synthesize executable tools, shell capabilities, and specialized skills with safety verification\n• 🤖 **Agent Personas** — Spawn or tune agents with custom models, system prompts, and tool RBAC\n• 🛡️ **Autonomous Trust Policies** — Automate approvals and configure trust rules\n• 📊 **Platform Telemetry** — Inspect live system state, vector memories, and debate history\n\nWhat would you like to build or modify first?",
+                },
+              ])}
+              className="min-h-[36px] px-2.5 py-1 text-[11px] text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition"
+              title="Reset Conversation"
+            >
+              🧹 Clear
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-3 py-3 pr-1">
@@ -296,6 +370,17 @@ export default function ConciergeChat({
                               {tc.pattern && <span className="text-emerald-400 ml-1">({tc.pattern})</span>}
                             </div>
                           )}
+                          {tc.verification_status && (
+                            <div className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                              <span>🛡️</span>
+                              <span className="font-semibold">{tc.verification_status}</span>
+                            </div>
+                          )}
+                          {tc.step_added && (
+                            <div className="text-[11px] text-indigo-300 font-mono">
+                              Step: <span className="text-white font-bold">{tc.step_added}</span> ({tc.nodes_count} nodes)
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -336,8 +421,44 @@ export default function ConciergeChat({
           <div ref={chatEndRef} />
         </div>
 
-        {/* Quick prompt suggestions (one-touch shortcuts for mobile) */}
+        {/* Quick prompt suggestions (Offered First: System Modification & Verification Actions) */}
         <div className="flex items-center gap-1.5 overflow-x-auto py-1.5 no-scrollbar border-t border-slate-800/60">
+          <button
+            type="button"
+            data-testid="concierge-quick-new-workflow"
+            onClick={() => setInput("Create a new workflow with architect design and security verification for ")}
+            className="shrink-0 px-3 py-1.5 rounded-full bg-gradient-to-r from-indigo-900 to-purple-900 hover:from-indigo-800 hover:to-purple-800 border border-indigo-500/50 text-[11px] font-semibold text-white shadow-sm transition flex items-center gap-1"
+          >
+            <span>⚡</span>
+            <span>+ New Workflow (Verified)</span>
+          </button>
+          <button
+            type="button"
+            data-testid="concierge-quick-update-workflow"
+            onClick={() => setInput("Update the workflow to add automated security and linting verification")}
+            className="shrink-0 px-3 py-1.5 rounded-full bg-gradient-to-r from-purple-900 to-indigo-900 hover:from-purple-800 hover:to-indigo-800 border border-purple-500/50 text-[11px] font-semibold text-purple-200 transition flex items-center gap-1"
+          >
+            <span>✏️</span>
+            <span>Update Workflow (Verified)</span>
+          </button>
+          <button
+            type="button"
+            data-testid="concierge-quick-synthesize-tool"
+            onClick={() => setInput("Synthesize a new tool named 'health_probe' with description 'Inspect service status' using command 'curl -s http://localhost:8000/health' and assign it to architect.")}
+            className="shrink-0 px-3 py-1.5 rounded-full bg-gradient-to-r from-emerald-950 to-teal-950 hover:bg-emerald-900 border border-emerald-500/50 text-[11px] font-semibold text-emerald-300 transition flex items-center gap-1"
+          >
+            <span>🛠️</span>
+            <span>+ Add Tool / Skill</span>
+          </button>
+          <button
+            type="button"
+            data-testid="concierge-quick-create-agent"
+            onClick={() => setInput("Create a new agent named 'DevOps Engineer' with role 'Continuous Delivery & Infrastructure' and assign bash_executor tool.")}
+            className="shrink-0 px-3 py-1.5 rounded-full bg-slate-950 hover:bg-slate-800 border border-slate-700 text-[11px] text-slate-200 transition flex items-center gap-1"
+          >
+            <span>🤖</span>
+            <span>+ Create Agent</span>
+          </button>
           <button
             type="button"
             onClick={() => setInput("Permanently approve bash commands starting with git")}
@@ -601,6 +722,28 @@ export default function ConciergeChat({
                 className="min-h-[44px] min-w-[44px] px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs font-mono text-slate-200"
               >
                 {preferLocal ? "Mode: Local First" : "Mode: NIM First"}
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleToggleDecisionEnabled}
+                aria-label="Toggle Decision Model"
+                className={`min-h-[44px] min-w-[44px] flex-1 px-3 py-2 border rounded-lg text-xs font-mono transition ${
+                  decisionEnabled
+                    ? "bg-emerald-950/60 border-emerald-700 text-emerald-300"
+                    : "bg-slate-950 border-slate-700 text-slate-400"
+                }`}
+              >
+                Decision Model: {decisionEnabled ? "ON" : "OFF"}
+              </button>
+              <button
+                type="button"
+                onClick={handleToggleDecisionProvider}
+                aria-label="Toggle Decision Provider"
+                className="min-h-[44px] min-w-[44px] flex-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs font-mono text-cyan-300"
+              >
+                Provider: {decisionProvider}
               </button>
             </div>
             <div className="flex gap-2">

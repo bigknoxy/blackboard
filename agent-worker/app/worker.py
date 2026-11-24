@@ -101,6 +101,41 @@ class StatelessWorkerDaemon:
         if owner == self.worker_id:
             await self.redis.delete(lease_key)
 
+    async def _lease_heartbeat_loop(
+        self, task_id: str, interval_seconds: int = 15
+    ) -> None:
+        """
+        Preemptive watchdog: Periodically extends task lease TTL in Redis
+        while worker is actively executing, preventing zombie lease timeouts
+        during long LLM generation or multi-step tool debates.
+        """
+        lease_key = f"task:{task_id}:lease"
+        while True:
+            try:
+                await asyncio.sleep(interval_seconds)
+                owner = await self.redis.get(lease_key)
+                if owner == self.worker_id:
+                    await self.redis.expire(lease_key, self.lease_ttl_seconds)
+                    logger.debug(
+                        "Extended lease for task '%s' by %ds (worker='%s')",
+                        task_id,
+                        self.lease_ttl_seconds,
+                        self.worker_id,
+                    )
+                else:
+                    logger.warning(
+                        "Lost ownership of task lease '%s' (current owner: %s)",
+                        task_id,
+                        owner,
+                    )
+                    break
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(
+                    "Heartbeat renewal error for task '%s': %s", task_id, exc
+                )
+
     async def run_forever(self) -> None:
         await self.ensure_consumer_group()
         logger.info(
@@ -158,6 +193,11 @@ class StatelessWorkerDaemon:
                 "worker_id": self.worker_id,
             }
 
+        heartbeat_task = asyncio.create_task(
+            self._lease_heartbeat_loop(
+                task_id, interval_seconds=max(5, self.lease_ttl_seconds // 4)
+            )
+        )
         try:
             logger.info(
                 "Worker '%s' acquired lease for task '%s' (agent='%s')",
@@ -184,6 +224,11 @@ class StatelessWorkerDaemon:
                 "error": str(exc),
             }
         finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             if self.release_on_finish:
                 await self.release_task_lease(task_id)
 
