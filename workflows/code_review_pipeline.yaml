@@ -40,7 +40,7 @@ nodes:
     type: VerificationTask
     agent_id: qa-tester
     entry_type: test_result
-    verify_command: "pytest tests/falsifications/test_interactive_telegram_and_channel_gateway.py -q --tb=short"
+    verify_command: "pytest tests/unit/ -q --tb=short"
     max_iterations: 3
     timeout: 60
     trusted_command: true
