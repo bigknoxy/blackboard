@@ -776,12 +776,15 @@ async def test_falsifier_17_generic_research_plan_verify_workflow_dispatch(db_se
 
     wf = await db_session.get(WorkflowModel, "research_plan_verify_pipeline")
     if not wf:
+        wf_name = "Generic Research, Planning & Iterative Verification Pipeline"
         wf = WorkflowModel(
             id="research_plan_verify_pipeline",
-            name="Generic Research, Planning & Iterative Verification Pipeline",
+            name=wf_name,
             state_graph=graph,
             yaml_source=yaml_src,
-            bpmn_xml=workflow_engine.graph_to_bpmn_xml(graph),
+            bpmn_xml=workflow_engine.graph_to_bpmn_xml(
+                "research_plan_verify_pipeline", wf_name, graph
+            ),
         )
         db_session.add(wf)
         await db_session.commit()
