@@ -124,6 +124,7 @@ EntryTypeLiteral = Literal[
     "test_result",
     "steering",
     "summary",
+    "research",
 ]
 
 

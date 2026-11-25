@@ -45,6 +45,7 @@ def test_blackboard_entry_types_enforced():
         "code",
         "test_result",
         "steering",
+        "research",
     ):
         entry = BlackboardEntryCreate(
             workflow_id="code_review_pipeline",
