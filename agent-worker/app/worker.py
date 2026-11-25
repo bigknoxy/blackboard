@@ -162,6 +162,15 @@ class StatelessWorkerDaemon:
 
             except asyncio.CancelledError:
                 break
+            except ResponseError as exc:
+                if "NOGROUP" in str(exc):
+                    logger.warning(
+                        "Received NOGROUP error from Redis; recovering consumer group..."
+                    )
+                    await self.ensure_consumer_group()
+                    continue
+                logger.warning("Worker loop ResponseError: %s", exc)
+                await asyncio.sleep(2.0)
             except Exception as exc:
                 logger.warning("Worker loop error: %s", exc)
                 await asyncio.sleep(2.0)
