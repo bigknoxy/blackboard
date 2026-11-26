@@ -1693,6 +1693,10 @@ async def get_llm_router_status() -> Dict[str, Any]:
     gemini_model = (
         r_gem_model or os.getenv("GEMINI_DECISION_MODEL", "gemini-decision-1")
     ).strip()
+    r_ollama_clf = await redis_client.get("llm:decision:ollama_model")
+    ollama_classifier_model = (
+        r_ollama_clf or os.getenv("OLLAMA_CLASSIFIER_MODEL", "qwen3.5:0.8b")
+    ).strip()
 
     classifier_url = (
         os.getenv("CLASSIFIER_OPENAI_URL")
@@ -1724,6 +1728,8 @@ async def get_llm_router_status() -> Dict[str, Any]:
             "provider": decision_provider,
             "gemini_api_key_configured": bool(effective_gem_key),
             "gemini_model": gemini_model,
+            "ollama_classifier_model": ollama_classifier_model,
+            "ollama_url": os.getenv("LOCAL_OLLAMA_URL", "http://192.168.8.136:11434"),
             "local_endpoints": local_decision_endpoints,
         },
         "nvidia_nim": {
@@ -1834,6 +1840,10 @@ async def update_llm_router_config(
     if payload.gemini_decision_model is not None:
         await redis_client.set(
             "llm:decision:gemini_model", payload.gemini_decision_model.strip()
+        )
+    if payload.ollama_classifier_model is not None:
+        await redis_client.set(
+            "llm:decision:ollama_model", payload.ollama_classifier_model.strip()
         )
     if payload.clear_cooldowns and hasattr(redis_client, "keys"):
         cd_keys = await redis_client.keys("llm:cooldown:*")
