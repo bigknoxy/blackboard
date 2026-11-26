@@ -47,7 +47,11 @@ async def test_complete_workflow_run_generates_clean_summary():
         status="RUNNING",
         current_nodes=["end_research_plan"],
         completed_nodes=["stage_deep_research", "stage_architect_plan"],
-        context={"initial_prompt": "ESP32 shopping list", "last_verdict": "PASS"},
+        context={
+            "initial_prompt": "ESP32 shopping list",
+            "last_verdict": "PASS",
+            "verified_urls": ["https://example.com/esp32"],
+        },
         created_at=None,
     )
     workflow = SimpleNamespace(id="research_plan_verify_pipeline", name="Research Pipeline")
@@ -96,7 +100,8 @@ async def test_complete_workflow_run_generates_clean_summary():
     assert mock_notify.await_count == 1
     sent_summary = mock_notify.await_args.kwargs["summary"]
     assert "https://example.com/esp32" in sent_summary
-    assert "https://example.com/mic" in sent_summary
+    assert "https://www.amazon.com/s?k=INMP441+Mic" in sent_summary
+    assert "https://example.com/mic" not in sent_summary
     assert "stage(s)" not in sent_summary
     assert "<tool_call>" not in sent_summary
     assert "<arg_key>" not in sent_summary

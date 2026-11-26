@@ -137,6 +137,7 @@ class StatelessAgentRunner:
                     raw_query,
                     flags=re.IGNORECASE,
                 ).strip()[:220]
+                ws_results: List[Dict[str, Any]] = []
                 try:
                     ws_resp = await client.post(
                         f"{CONTROL_PLANE_URL}/api/v1/tools/invoke",
@@ -292,6 +293,11 @@ class StatelessAgentRunner:
             final_content = f"{clean_llm_output}{tool_execution_summary}"
 
             # 7. Commit Output Artifact to the Shared Blackboard
+            verified_urls_from_search = [
+                r.get("url", "")
+                for r in ws_results
+                if r.get("url")
+            ]
             bb_resp = await client.post(
                 f"{CONTROL_PLANE_URL}/api/v1/blackboard",
                 json={
@@ -307,6 +313,7 @@ class StatelessAgentRunner:
                         "llm_source": llm_source,
                         "memories_hydrated": len(memories),
                         "steering_applied": len(steering_notes),
+                        "verified_urls": verified_urls_from_search,
                     },
                 },
             )
