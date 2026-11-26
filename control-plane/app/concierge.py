@@ -1052,11 +1052,20 @@ class ConciergeAdminAgent:
                         "status": "CRYSTALLIZED",
                     })
 
-        # Store Memory & Operator Preference Intent
-        is_remember_intent = any(
+        # Store Memory & Operator Preference Intent (never trigger on interrogative recall questions)
+        is_recall_question = any(
             k in lowered for k in [
-                "remember", "save to memory", "store in memory", "keep in mind", "note that"
+                "what do you remember", "do you remember", "can you remember",
+                "tell me what you remember", "what did i ask you to remember",
             ]
+        )
+        is_remember_intent = (
+            not is_recall_question
+            and any(
+                k in lowered for k in [
+                    "remember", "save to memory", "store in memory", "keep in mind", "note that"
+                ]
+            )
         )
         if is_remember_intent:
             fact_text = msg
@@ -1246,6 +1255,23 @@ class ConciergeAdminAgent:
                     }
                 )
 
+        # Short-circuit immediately when Stage 1 or Stage 2 already triggered a workflow
+        # (prevents the ReAct LLM loop from firing a duplicate workflow run and saves latency).
+        early_trig = [
+            t for t in tool_calls_executed
+            if t.get("tool") == "trigger_workflow" and t.get("run_id")
+        ]
+        if early_trig:
+            t0 = early_trig[0]
+            return ConciergeChatResponse(
+                reply=(
+                    f"🚀 Started **{t0['workflow_id']}** (Run `{str(t0['run_id'])[:8]}`). "
+                    f"I'll notify you on HITL gates and when it completes."
+                ),
+                tool_calls_executed=tool_calls_executed,
+                system_state_summary=state_snapshot,
+            )
+
         # Attempt LLM synthesis via LAN Ollama/llama.cpp if reachable; otherwise synthesize rich admin report
         llm_reply, native_calls = await self._try_ollama_chat_with_tools(
             msg, state_snapshot, tool_calls_executed, history=req.history
@@ -1260,7 +1286,7 @@ class ConciergeAdminAgent:
                     pc for pc in parsed_calls
                     if pc.get("tool") and not any(
                         t.get("tool") == pc.get("tool")
-                        and t.get("status") in ("EXECUTED", "STORED", "RETRIEVED", "PENDING_APPROVAL", "CREATED", "OK")
+                        and t.get("status") in ("EXECUTED", "RUNNING", "STORED", "RETRIEVED", "PENDING_APPROVAL", "AWAITING_APPROVAL", "CREATED", "OK")
                         for t in tool_calls_executed
                     )
                 ]
@@ -1403,12 +1429,23 @@ class ConciergeAdminAgent:
                     bypass_approval=False,
                 ),
             )
+            # Use hitl_ticket_id (not ticket_id) per ToolInvokeResponse schema
+            ticket = getattr(res, "hitl_ticket_id", None) or getattr(res, "ticket_id", None)
+            if res.status == "AWAITING_APPROVAL" or res.status == "PENDING_APPROVAL":
+                return {
+                    "tool": "bash_executor",
+                    "command": cmd,
+                    "status": res.status,
+                    "result": res.result,
+                    "hitl_ticket_id": str(ticket) if ticket else None,
+                    "message": f"⚠️ This command requires human approval. Ticket {ticket} has been queued in the HITL drawer. Use Telegram /approvals or the Cockpit HITL gate to approve.",
+                }
             return {
                 "tool": "bash_executor",
                 "command": cmd,
                 "status": res.status,
                 "result": res.result,
-                "ticket_id": res.ticket_id,
+                "hitl_ticket_id": str(ticket) if ticket else None,
             }
         elif tool_name == "list_memories":
             target_agent = args.get("agent_id")
@@ -1432,16 +1469,24 @@ class ConciergeAdminAgent:
             query = str(args.get("query") or args.get("q") or "").strip()
             target_agent = args.get("agent_id")
             q_emb = await compute_embedding(query or "research")
-            stmt = select(AgentMemoryModel)
+            # Order by created_at.desc() so newly stored facts are always in the scanned window
+            stmt = select(AgentMemoryModel).order_by(AgentMemoryModel.created_at.desc())
             if target_agent:
                 stmt = stmt.where(AgentMemoryModel.agent_id == str(target_agent))
             res_m = await session.execute(stmt.limit(100))
             mems = res_m.scalars().all()
             scored = []
             for m in mems:
+                # Lexical token-overlap boost: count overlapping tokens between query and memory
+                query_tokens = set(query.lower().split())
+                mem_tokens = set(m.content.lower().split())
+                overlap = len(query_tokens & mem_tokens)
+                # Embedding cosine similarity
                 emb = [float(x) for x in m.embedding] if m.embedding is not None else []
                 sim = sum(float(a) * b for a, b in zip(q_emb, emb)) if len(emb) == len(q_emb) else 0.0
-                scored.append((float(sim), m))
+                # Combined score: similarity + 0.1 * overlap (deterministic lexical boost)
+                boosted_score = sim + 0.1 * overlap
+                scored.append((boosted_score, m))
             scored.sort(key=lambda x: x[0], reverse=True)
             top = [
                 {"agent_id": m.agent_id, "content": m.content[:300], "score": round(float(s), 4)}
@@ -1455,7 +1500,25 @@ class ConciergeAdminAgent:
                 "results": top,
             }
         elif tool_name == "store_memory":
-            content = str(args.get("content") or args.get("fact") or "").strip()
+            # Never trigger store_memory on interrogative recall questions
+            raw_content = str(args.get("content") or "").strip()
+            user_msg_lower = raw_content.lower()
+            recall_patterns = [
+                user_msg_lower.startswith("what do you remember"),
+                user_msg_lower.startswith("do you remember"),
+                user_msg_lower.startswith("can you remember"),
+                user_msg_lower.startswith("tell me what you remember"),
+            ]
+            # Messages ending in '?' that don't start with 'remember that' or 'please remember'
+            ends_with_q = user_msg_lower.endswith("?")
+            not_starting_with_remember = not (
+                user_msg_lower.startswith("remember that") or user_msg_lower.startswith("please remember")
+            )
+            if ends_with_q and not_starting_with_remember and not any(recall_patterns):
+                # This is a pure recall question - do not store, return SKIPPED
+                return {"tool": "store_memory", "status": "SKIPPED", "message": "Recall question - no memory stored"}
+
+            content = raw_content
             target_agent = str(args.get("agent_id") or "concierge-admin").strip()
             if not content:
                 return {"tool": "store_memory", "status": "SKIPPED", "message": "Empty content"}
@@ -1595,7 +1658,7 @@ class ConciergeAdminAgent:
                     "tool": tool_name,
                     "status": res.status,
                     "result": res.result,
-                    "ticket_id": res.ticket_id,
+                    "hitl_ticket_id": getattr(res, "hitl_ticket_id", None) or getattr(res, "ticket_id", None),
                 }
             return {
                 "tool": tool_name,
