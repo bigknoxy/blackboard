@@ -384,6 +384,7 @@ class LLMRouterConfigRequest(BaseModel):
     decision_model_provider: Optional[str] = None
     gemini_api_key: Optional[str] = None
     gemini_decision_model: Optional[str] = None
+    ollama_classifier_model: Optional[str] = None
 
 
 # --- External Chat Bridge Schemas (Telegram / Discord / Webhook) ---

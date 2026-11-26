@@ -6,7 +6,18 @@ import ConciergeChat from "../components/ConciergeChat";
 // Mock api methods
 vi.mock("../api", () => ({
   api: {
-    getLlmStatus: vi.fn().mockResolvedValue({ prefer_local: true, nvidia_nim: {} }),
+    getLlmStatus: vi.fn().mockResolvedValue({
+      prefer_local: true,
+      nvidia_nim: {},
+      decision_model: {
+        enabled: true,
+        provider: "gemini",
+        gemini_api_key_configured: true,
+        gemini_model: "gemini-decision-1",
+        ollama_classifier_model: "qwen3.5:0.8b",
+      },
+    }),
+    updateLlmConfig: vi.fn().mockResolvedValue({ status: "ok" }),
     getChannelsStatus: vi.fn().mockResolvedValue({ telegram: {}, discord: {} }),
     chatConcierge: vi.fn().mockImplementation(
       () =>
@@ -139,5 +150,42 @@ describe("ConciergeChat - Mobile Input Ergonomics & Thinking Indicator", () => {
 
     expect(screen.getByText(/Synthesis complete/i)).toBeDefined();
     expect(screen.queryByTestId("concierge-thinking-indicator")).toBeNull();
+  });
+
+  it("renders Decision Model runtime config controls and saves immediately without restart", async () => {
+    const { api } = await import("../api");
+    render(<ConciergeChat />);
+
+    // Wait for initial getLlmStatus hydration
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const toggleBtn = screen.getByRole("button", { name: /Toggle Decision Model/i });
+    const providerBtn = screen.getByRole("button", { name: /Toggle Decision Provider/i });
+    const geminiKeyInput = screen.getByLabelText("Gemini API Key");
+    const geminiModelInput = screen.getByLabelText("Gemini Decision Model");
+    const ollamaModelInput = screen.getByLabelText("Ollama Classifier Model");
+
+    expect(toggleBtn.className).toContain("min-h-[44px]");
+    expect(providerBtn.className).toContain("min-h-[44px]");
+    expect(screen.getByText("GEMINI KEY READY")).toBeDefined();
+
+    fireEvent.change(geminiKeyInput, { target: { value: "AIzaTestKey123" } });
+    fireEvent.change(geminiModelInput, { target: { value: "gemini-decision-1" } });
+    fireEvent.change(ollamaModelInput, { target: { value: "qwen3.5:0.8b" } });
+
+    const saveBtn = screen.getByRole("button", { name: /Save Router & NIM Key/i });
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    expect(api.updateLlmConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        gemini_api_key: "AIzaTestKey123",
+        gemini_decision_model: "gemini-decision-1",
+        ollama_classifier_model: "qwen3.5:0.8b",
+      })
+    );
   });
 });

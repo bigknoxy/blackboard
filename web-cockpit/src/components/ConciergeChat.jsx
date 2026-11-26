@@ -34,6 +34,9 @@ export default function ConciergeChat({
   const [preferLocal, setPreferLocal] = useState(true);
   const [decisionEnabled, setDecisionEnabled] = useState(true);
   const [decisionProvider, setDecisionProvider] = useState("local");
+  const [geminiKeyInput, setGeminiKeyInput] = useState("");
+  const [geminiModelInput, setGeminiModelInput] = useState("gemini-decision-1");
+  const [ollamaClassifierInput, setOllamaClassifierInput] = useState("qwen3.5:0.8b");
   const [savingNim, setSavingNim] = useState(false);
   const [channelStatus, setChannelStatus] = useState(null);
   const [tgTokenInput, setTgTokenInput] = useState("");
@@ -77,6 +80,12 @@ export default function ConciergeChat({
         }
         if (st?.decision_model?.provider) {
           setDecisionProvider(st.decision_model.provider);
+        }
+        if (st?.decision_model?.gemini_model) {
+          setGeminiModelInput(st.decision_model.gemini_model);
+        }
+        if (st?.decision_model?.ollama_classifier_model) {
+          setOllamaClassifierInput(st.decision_model.ollama_classifier_model);
         }
       }
     } catch {
@@ -137,13 +146,19 @@ export default function ConciergeChat({
         prefer_local: preferLocal,
         decision_model_enabled: decisionEnabled,
         decision_model_provider: decisionProvider,
+        gemini_decision_model: geminiModelInput.trim() || "gemini-decision-1",
+        ollama_classifier_model: ollamaClassifierInput.trim() || "qwen2.5-coder:0.5b",
       };
       if (nimKeyInput.trim()) {
         payload.nvidia_nim_api_key = nimKeyInput.trim();
       }
+      if (geminiKeyInput.trim()) {
+        payload.gemini_api_key = geminiKeyInput.trim();
+      }
       const updated = await api.updateLlmConfig(payload);
       setLlmStatus(updated);
       setNimKeyInput("");
+      setGeminiKeyInput("");
     } catch {
       // ignore
     } finally {
@@ -745,6 +760,48 @@ export default function ConciergeChat({
               >
                 Provider: {decisionProvider}
               </button>
+            </div>
+            <div className="space-y-2 pt-1 border-t border-slate-800/60">
+              <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                <span>Decision Router Config (live, no restart)</span>
+                <span
+                  className={`px-2 py-0.5 rounded border text-[10px] ${
+                    llmStatus?.decision_model?.gemini_api_key_configured
+                      ? "bg-emerald-950/60 border-emerald-700 text-emerald-300"
+                      : "bg-slate-950 border-slate-800 text-slate-500"
+                  }`}
+                >
+                  {llmStatus?.decision_model?.gemini_api_key_configured
+                    ? "GEMINI KEY READY"
+                    : "GEMINI KEY UNSET"}
+                </span>
+              </div>
+              <input
+                type="password"
+                value={geminiKeyInput}
+                onChange={(e) => setGeminiKeyInput(e.target.value)}
+                aria-label="Gemini API Key"
+                placeholder="Paste Google AI Studio Key (AIza...) for gemini-decision-1"
+                className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={geminiModelInput}
+                  onChange={(e) => setGeminiModelInput(e.target.value)}
+                  aria-label="Gemini Decision Model"
+                  placeholder="gemini-decision-1"
+                  className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+                />
+                <input
+                  type="text"
+                  value={ollamaClassifierInput}
+                  onChange={(e) => setOllamaClassifierInput(e.target.value)}
+                  aria-label="Ollama Classifier Model"
+                  placeholder="qwen3.5:0.8b"
+                  className="min-h-[44px] w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+                />
+              </div>
             </div>
             <div className="flex gap-2">
               <button

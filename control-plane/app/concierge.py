@@ -2123,30 +2123,37 @@ class ConciergeAdminAgent:
                 in_cooldown = False
 
             if not in_cooldown:
-                wf_choices = [{"id": wf, "label": wf} for wf in available_workflows] + [
-                    {"id": "none", "label": "No workflow needed"}
-                ]
+                wf_criteria = {
+                    wf: f"Select `{wf}` when it best matches the operator's request."
+                    for wf in available_workflows
+                }
+                wf_criteria["none"] = "No workflow pipeline is needed."
+                model_ref = (
+                    gemini_model
+                    if gemini_model.startswith("models/")
+                    else f"models/{gemini_model}"
+                )
                 decision_payload = {
-                    "model": gemini_model,
+                    "model": model_ref,
                     "input": user_msg[:800],
-                    "questions": [
-                        {
-                            "id": "intent",
-                            "prompt": "Classify the operator request intent.",
-                            "choices": [
-                                {"id": "trigger_workflow", "label": "Run or start a multi-agent workflow pipeline"},
-                                {"id": "inspect_state", "label": "Inspect platform status, blackboard, backlog, or agents"},
-                                {"id": "memory_op", "label": "Remember, recall, or search stored memories"},
-                                {"id": "tool_exec", "label": "Execute shell command, web search, or weather lookup"},
-                                {"id": "chat", "label": "General chat, greeting, or explanation"},
-                            ],
+                    "questions": {
+                        "intent": {
+                            "type": "choice",
+                            "instructions": "Classify the operator request intent.",
+                            "criteria": {
+                                "trigger_workflow": "Run or start a multi-agent workflow pipeline (audit, review, research, shopping list, build, fix).",
+                                "inspect_state": "Inspect platform status, blackboard, backlog, or agents.",
+                                "memory_op": "Remember, recall, or search stored memories.",
+                                "tool_exec": "Execute shell command, web search, or weather lookup.",
+                                "chat": "General chat, greeting, or explanation.",
+                            },
                         },
-                        {
-                            "id": "workflow_id",
-                            "prompt": "Select the target workflow_id if intent is trigger_workflow.",
-                            "choices": wf_choices,
+                        "workflow_id": {
+                            "type": "choice",
+                            "instructions": "Select the target workflow_id if intent is trigger_workflow, otherwise none.",
+                            "criteria": wf_criteria,
                         },
-                    ],
+                    },
                 }
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -2233,6 +2240,74 @@ class ConciergeAdminAgent:
             except Exception as exc:
                 logger.debug("Classifier call to %s failed: %s", base_url, exc)
                 continue
+
+        # Local Ollama fallback (e.g. 192.168.8.136:11434) when llama.cpp nodes are offline
+        ollama_url = (os.getenv("LOCAL_OLLAMA_URL") or LOCAL_OLLAMA_URL or "").rstrip("/")
+        if ollama_url:
+            configured_ollama_model = os.getenv("OLLAMA_CLASSIFIER_MODEL", "qwen3.5:0.8b")
+            try:
+                if redis_client is not None:
+                    r_om = await redis_client.get("llm:decision:ollama_model")
+                    if r_om:
+                        configured_ollama_model = str(r_om).strip()
+            except Exception:
+                pass
+            if configured_ollama_model:
+                # Ultra-compact 1-token indexed classifier for CPU-only Ollama nodes
+                option_map: Dict[str, Tuple[str, Optional[str]]] = {}
+                option_lines: List[str] = []
+                idx = 1
+                for wf in available_workflows:
+                    option_map[str(idx)] = ("trigger_workflow", wf)
+                    option_lines.append(f"{idx} = run workflow {wf}")
+                    idx += 1
+                static_options = [
+                    ("inspect_state", "inspect platform status, blackboard, backlog, or agents"),
+                    ("memory_op", "remember, recall, or search stored memories"),
+                    ("tool_exec", "run shell command, web search, weather, or time"),
+                    ("chat", "greeting, general question, or conversation"),
+                ]
+                for intent_name, desc in static_options:
+                    option_map[str(idx)] = (intent_name, None)
+                    option_lines.append(f"{idx} = {intent_name} ({desc})")
+                    idx += 1
+                compact_sys = (
+                    "Classify the user request. Reply with ONLY ONE number:\n"
+                    + "\n".join(option_lines)
+                    + f"\nReply with just a single digit (1-{idx - 1})."
+                )
+                try:
+                    async with httpx.AsyncClient(timeout=25.0) as client:
+                        resp = await client.post(
+                            f"{ollama_url}/api/chat",
+                            json={
+                                "model": configured_ollama_model,
+                                "stream": False,
+                                "think": False,
+                                "options": {"temperature": 0.0, "num_predict": 4},
+                                "messages": [
+                                    {"role": "system", "content": compact_sys},
+                                    {"role": "user", "content": user_msg[:500]},
+                                ],
+                            },
+                        )
+                    if resp.status_code == 200:
+                        raw = (((resp.json() or {}).get("message") or {}).get("content") or "").strip()
+                        digit_match = re.search(r"\b(\d+)\b", raw)
+                        if digit_match and digit_match.group(1) in option_map:
+                            chosen_intent, chosen_wf = option_map[digit_match.group(1)]
+                            return {
+                                "intent": chosen_intent,
+                                "workflow_id": chosen_wf,
+                                "confidence": 0.8,
+                                "provider": f"ollama:{configured_ollama_model}",
+                            }
+                except Exception as exc:
+                    logger.debug(
+                        "Ollama classifier call (%s) failed: %s",
+                        configured_ollama_model,
+                        exc,
+                    )
         return fallback
 
     async def _try_ollama_chat(
