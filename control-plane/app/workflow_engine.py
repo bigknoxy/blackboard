@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import yaml
 
 from app.database import get_redis
+from app.web_grounding import sanitize_and_ground_links, verify_deliverable_links
 from app.models import (
     BlackboardEntryModel,
     HITLTicketModel,
@@ -805,6 +806,25 @@ class WorkflowEngine:
         origin_channel = ctx.get("origin_channel")
         origin_chat_id = ctx.get("origin_chat_id")
 
+        # Collect verified_urls from run context and entry metadata
+        verified_urls: List[str] = list(ctx.get("verified_urls") or [])
+        # Also pull verified_urls from blackboard entries' metadata
+        try:
+            from sqlalchemy import select as sa_select
+            from app.models import BlackboardEntryModel
+
+            stmt = sa_select(BlackboardEntryModel).where(
+                BlackboardEntryModel.workflow_id == workflow.id,
+                BlackboardEntryModel.entry_type != "summary",
+            )
+            entry_res = await session.execute(stmt)
+            for ent in entry_res.scalars().all():
+                emeta = ent.metadata_ or {}
+                entry_verified = emeta.get("verified_urls", []) or []
+                verified_urls.extend(entry_verified)
+        except Exception:
+            pass
+
         def _clean_artifact(raw: str) -> str:
             cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", raw or "", flags=re.DOTALL)
             cleaned = re.sub(r"<tool_name>.*?</tool_name>", "", cleaned, flags=re.DOTALL)
@@ -869,6 +889,12 @@ class WorkflowEngine:
             summary_lines.append(f"Completed workflow `{workflow.id}`.")
 
         summary_text = "\n\n".join(summary_lines)
+
+        # Sanitize and ground links in summary text to prevent hallucinated URLs leaking
+        sanitized_text, grounding_report = sanitize_and_ground_links(
+            summary_text, verified_urls=verified_urls
+        )
+
         try:
             session.add(
                 BlackboardEntryModel(
@@ -876,11 +902,13 @@ class WorkflowEngine:
                     task_id=str(run.id),
                     agent_id="workflow-engine",
                     entry_type="summary",
-                    content=summary_text,
+                    content=sanitized_text,
                     metadata_={
                         "run_id": str(run.id),
                         "status": "COMPLETED",
                         "origin_channel": origin_channel,
+                        "verified_urls": verified_urls,
+                        "grounding_report": grounding_report,
                     },
                 )
             )
@@ -894,7 +922,7 @@ class WorkflowEngine:
                 "run_id": str(run.id),
                 "node_id": nid,
                 "status": "COMPLETED",
-                "summary": summary_text,
+                "summary": sanitized_text,
                 "origin_channel": origin_channel,
             }
         )
@@ -908,7 +936,7 @@ class WorkflowEngine:
                 channel_gateway.notify_workflow_completed(
                     workflow_id=workflow.id,
                     run_id=str(run.id),
-                    summary=summary_text,
+                    summary=sanitized_text,
                     status="COMPLETED",
                     origin_channel=origin_channel,
                     metadata=meta,
@@ -932,8 +960,130 @@ class WorkflowEngine:
         import asyncio
         from app.mcp_gateway import mcp_gateway
         from app.schemas import ToolInvokeRequest
+        from app.web_grounding import verify_deliverable_links
 
         nid = node["id"]
+        verify_mode = node.get("verify_mode", "") or ""
+
+        # Built-in deterministic web-link verification mode
+        if verify_mode == "web_links":
+            ctx = dict(run.context or {})
+            initial_prompt = ctx.get("initial_prompt", "") or ""
+
+            # Collect deliverable text from blackboard entries
+            # The primary deliverable is typically the first non-operator entry
+            primary_deliverable = ""
+            research_section = ""
+
+            try:
+                from sqlalchemy import select as sa_select
+                from app.models import BlackboardEntryModel
+
+                stmt = sa_select(BlackboardEntryModel).where(
+                    BlackboardEntryModel.workflow_id == workflow.id,
+                    BlackboardEntryModel.entry_type != "summary",
+                    BlackboardEntryModel.agent_id != "operator",
+                ).order_by(
+                    BlackboardEntryModel.created_at.asc(),
+                )
+                entry_res = await session.execute(stmt)
+                entries = list(entry_res.scalars().all())
+
+                for ent in entries:
+                    clean = (ent.content or "").strip()
+                    if not clean:
+                        continue
+                    if "http://" in clean or "https://" in clean or "**Web Search Results:**" in clean:
+                        research_section = clean
+                    if not primary_deliverable:
+                        primary_deliverable = clean
+            except Exception as exc:
+                logger.debug("Failed to fetch entries for web_links verification: %s", exc)
+
+            # If we have a primary deliverable, verify its links
+            if primary_deliverable:
+                # Pull verified_urls from context
+                verified_urls = ctx.get("verified_urls") or []
+                # Also check metadata from entries for verified_urls
+                try:
+                    stmt2 = sa_select(BlackboardEntryModel).where(
+                        BlackboardEntryModel.workflow_id == workflow.id,
+                        BlackboardEntryModel.entry_type != "summary",
+                    )
+                    entry_res2 = await session.execute(stmt2)
+                    for ent in entry_res2.scalars().all():
+                        emeta = ent.metadata_ or {}
+                        entry_verified = emeta.get("verified_urls", []) or []
+                        verified_urls.extend(entry_verified)
+                except Exception:
+                    pass
+
+                result = verify_deliverable_links(
+                    primary_deliverable, verified_urls=verified_urls, require_links=False
+                )
+
+                # Persist the outcome to the Blackboard
+                session.add(
+                    BlackboardEntryModel(
+                        workflow_id=workflow.id,
+                        task_id=str(run.id),
+                        agent_id=node.get("agent_id") or "qa-tester",
+                        entry_type="test_result" if result["passed"] else "critique",
+                        content=(
+                            f"Web link verification (verify_mode='web_links') "
+                            f"{'PASSED' if result['passed'] else 'FAILED'}:\n"
+                            f"Issues: {', '.join(result['issues']) if result['issues'] else 'none'}\n"
+                            f"Report: {result['report']}"
+                        ),
+                        metadata_={"node_id": nid, "verify_mode": "web_links", "result": str(result["passed"])},
+                    )
+                )
+
+                if result["passed"]:
+                    ctx["last_verdict"] = "PASS"
+                    run.context = ctx
+                    await self.advance_from_node(session, workflow, run, nid, branch_outcome="PASS")
+                    return
+                else:
+                    ctx["last_verdict"] = "FAIL"
+                    run.context = ctx
+                    run.status = "FAILED"
+                    run.current_nodes = []
+                    fail_summary = (
+                        f"**Goal:** {initial_prompt}\n"
+                        f"**Failed Gate:** `{nid}` (web_links verification) after 1 attempt.\n"
+                        f"Issues: {'; '.join(result['issues'])}"
+                    )
+                    # Persist failure summary
+                    session.add(
+                        BlackboardEntryModel(
+                            workflow_id=workflow.id,
+                            task_id=str(run.id),
+                            agent_id="workflow-engine",
+                            entry_type="summary",
+                            content=fail_summary,
+                            metadata_={"run_id": str(run.id), "stage": "VerificationFailure"},
+                        )
+                    )
+                    await self._publish_event(
+                        {
+                            "event": "workflow.verification_failed",
+                            "workflow_id": workflow.id,
+                            "run_id": str(run.id),
+                            "node_id": nid,
+                            "verification_mode": "web_links",
+                            "issues": result["issues"],
+                        }
+                    )
+                    return
+            else:
+                # No deliverable text found, treat as PASS (no links to verify)
+                ctx["last_verdict"] = "PASS"
+                run.context = ctx
+                await self.advance_from_node(session, workflow, run, nid, branch_outcome="PASS")
+                return
+
+        # Original: bash_executor-based verification
         cmd = (node.get("verify_command") or node.get("command") or "").strip()
         if not cmd:
             await self.advance_from_node(session, workflow, run, nid, branch_outcome="PASS")

@@ -112,6 +112,75 @@ async def compute_embedding(text_input: str) -> List[float]:
     return [round(v / norm, 6) for v in vec]
 
 
+def categorize_deliverable(user_msg: str) -> str:
+    """
+    Categorize a user message into a deliverable type.
+
+    Uses the runtime decision model setting (DECISION_MODEL_ENABLED env var)
+    or deterministic keyword fallback when off/offline.
+
+    Returns one of: 'shopping_list', 'software_plan', 'code_review',
+      'general_research', 'troubleshooting'
+    """
+    msg_lower = user_msg.lower()
+
+    # Check decision model enabled status
+    from app.concierge import DECISION_MODEL_ENABLED as _dm_enabled
+
+    if _dm_enabled:
+        # When decision model is enabled, we still use keyword fallback
+        # for now since the actual LLM classifier is integrated via
+        # the _classify_intent infrastructure. The keyword fallback ensures
+        # functionality even when the LLM provider is unavailable.
+        pass
+
+    # Deterministic keyword fallback
+    shopping_keywords = [
+        "shopping", "buy", "purchase", "amazon", "order", "cart",
+        "product", "item", "delivery", "shipping",
+    ]
+    software_keywords = [
+        "software", "code", "review", "debug", "implementation",
+        "library", "framework", "application", "build",
+    ]
+    code_review_keywords = [
+        "code review", "review code", "pull request", "pr raise",
+        "refactor", "reviewing", "check code",
+    ]
+    research_keywords = [
+        "research", "investigate", "analyze", "study",
+        "find information", "lookup",
+    ]
+    troubleshooting_keywords = [
+        "troubleshoot", "fix", "error", "bug", "issue",
+        "problem", "not working", "broken",
+        "not turning on", "doesn't work", "malfunction", "crash",
+        "slow", "hang", "freeze", "error message",
+    ]
+
+    # Check most specific patterns first
+    # code_review: specific phrases indicating a code review request
+    # This must come before software_plan since "code" is in software_keywords
+    # Also matches "Check my code for errors" style messages
+    if any(k in msg_lower for k in ["code review", "review code", "pull request", "pr ", "reviewing", "check code", "check my code"]):
+        return "code_review"
+
+    if any(k in msg_lower for k in shopping_keywords):
+        return "shopping_list"
+
+    if any(k in msg_lower for k in software_keywords):
+        return "software_plan"
+
+    if any(k in msg_lower for k in research_keywords):
+        return "general_research"
+
+    if any(k in msg_lower for k in troubleshooting_keywords):
+        return "troubleshooting"
+
+    # Default
+    return "general_research"
+
+
 class ConciergeAdminAgent:
     """
     Administrative Concierge Agent equipped with internal MCP meta-tools
@@ -303,7 +372,8 @@ class ConciergeAdminAgent:
             wf = await session.get(WorkflowModel, wf_id)
             if wf:
                 run = await workflow_engine.start_workflow_run(
-                    session, wf, initial_prompt=msg
+                    session, wf, initial_prompt=msg,
+                    initial_context={"deliverable_category": categorize_deliverable(msg)}
                 )
                 tool_calls_executed.append(
                     {
@@ -324,7 +394,8 @@ class ConciergeAdminAgent:
                 wf = await session.get(WorkflowModel, wf_id)
             if wf:
                 run = await workflow_engine.start_workflow_run(
-                    session, wf, initial_prompt=msg
+                    session, wf, initial_prompt=msg,
+                    initial_context={"deliverable_category": categorize_deliverable(msg)}
                 )
                 tool_calls_executed.append(
                     {
@@ -373,7 +444,8 @@ class ConciergeAdminAgent:
             run = None
             if meta_wf:
                 run = await workflow_engine.start_workflow_run(
-                    session, meta_wf, initial_prompt=msg
+                    session, meta_wf, initial_prompt=msg,
+                    initial_context={"deliverable_category": categorize_deliverable(msg)}
                 )
 
             target_wf = await session.get(WorkflowModel, target_wf_id)

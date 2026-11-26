@@ -237,6 +237,7 @@ class WorkflowNode(BaseModel):
     prompt_template: Optional[str] = None
     condition_expression: Optional[str] = None
     verify_command: Optional[str] = None
+    verify_mode: Optional[str] = None
     max_iterations: Optional[int] = 3
 
 
