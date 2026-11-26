@@ -15,20 +15,26 @@ nodes:
     agent_id: researcher
     entry_type: research
     prompt_template: >
-      Conduct thorough research on the operator's request using available tools (web_search, repo_search).
-      Gather concrete architectural patterns, implementation details, and verified references.
-      Document all findings clearly on the Blackboard. If this is a REWORK iteration, address every
-      gap identified in the QA critique.
+      Conduct thorough research on the operator's exact request using live web search results.
+      Gather concrete options, real product names, approximate prices, and clickable Markdown links
+      ([Title](https://...)) directly from the web search evidence. Never invent fake URLs.
+      If this is a REWORK iteration, address every gap identified in the QA critique.
 
   - id: stage_architect_plan
-    name: Enhancement Plan & Backlog Synthesis
+    name: Human-Friendly Deliverable & Plan Synthesis
     type: ServiceTask
     agent_id: architect
     entry_type: spec
     prompt_template: >
-      Synthesize the researcher's findings into a concrete, prioritized enhancement plan and backlog items
-      aligned with AGENTS.md invariants. For each proposed enhancement, include a clear title, technical
-      scope, priority (P0-P3), and acceptance criteria.
+      Synthesize the researcher's findings into a clear, human-friendly final deliverable tailored
+      to what the operator actually asked for.
+      - If the operator asked for a shopping list, hardware build, or product recommendations:
+        present a clean, readable shopping list with exact item names, clickable Markdown product links
+        from the research findings, approximate prices, total estimated cost, and beginner/compatibility notes
+        (do NOT use Jira ticket jargon like P0/P1 or Acceptance Criteria).
+      - If the operator asked for a software/architecture plan: present a clear prioritized plan with
+        concrete technical steps and acceptance criteria.
+      Include every requirement the operator mentioned (e.g., no-solder, battery option, links).
 
   - id: stage_verify_quality
     name: Iterative Quality & Completeness Verification
@@ -36,10 +42,10 @@ nodes:
     agent_id: qa-tester
     entry_type: critique
     prompt_template: >
-      Verify the research findings and enhancement plan against the operator's original request.
-      Check that every claim is grounded, no tool calls were skipped or hallucinated, and backlog items
-      are actionable. Respond with PASS if the result is thorough and ready, or REWORK with specific
-      missing items to iterate on.
+      Verify the final deliverable against the operator's original request from a human's perspective.
+      Check that: (1) every constraint requested by the operator is covered (e.g., links, battery, no-solder),
+      (2) clickable URLs are included when links were requested, and (3) the formatting is readable and helpful.
+      Respond with PASS if complete and helpful, or REWORK listing the exact missing items.
 
   - id: gateway_verify_quality
     name: Quality Verification Verdict

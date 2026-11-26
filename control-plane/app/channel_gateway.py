@@ -257,32 +257,42 @@ class TelegramChannel(BaseChannel):
         md_text = (
             f"{icon} **Workflow `{workflow_id}` {status}**\n"
             f"Run: `{run_id[:8]}`\n\n"
-            f"{summary[:3200]}"
+            f"{summary}"
         )
-        html_text = ChannelGateway._markdown_to_telegram_html(md_text)[:4000]
-        keyboard = [self._cockpit_button_row(creds["cockpit_url"])]
+        # Chunk cleanly at <=3800 chars, attach cockpit button to final chunk only
+        MAX_CHUNK = 3800
+        chunks = [md_text[i:i + MAX_CHUNK] for i in range(0, max(1, len(md_text)), MAX_CHUNK)]
+        cockpit_markup = {"inline_keyboard": [self._cockpit_button_row(creds["cockpit_url"])]}
 
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
-                res = await client.post(
-                    f"https://api.telegram.org/bot{creds['token']}/sendMessage",
-                    json={
+                res = None
+                for i, chunk in enumerate(chunks):
+                    is_last = (i == len(chunks) - 1)
+                    formatted_html = ChannelGateway._markdown_to_telegram_html(chunk)
+                    payload: Dict[str, Any] = {
                         "chat_id": target_chat,
-                        "text": html_text,
+                        "text": formatted_html,
                         "parse_mode": "HTML",
-                        "reply_markup": {"inline_keyboard": keyboard},
-                    },
-                )
-                if res.status_code != 200:
+                    }
+                    if is_last:
+                        payload["reply_markup"] = cockpit_markup
                     res = await client.post(
                         f"https://api.telegram.org/bot{creds['token']}/sendMessage",
-                        json={
-                            "chat_id": target_chat,
-                            "text": md_text[:4000],
-                            "reply_markup": {"inline_keyboard": keyboard},
-                        },
+                        json=payload,
                     )
-                return {"status": "DELIVERED", "http_code": res.status_code}
+                    if res.status_code != 200:
+                        fallback_payload: Dict[str, Any] = {
+                            "chat_id": target_chat,
+                            "text": chunk,
+                        }
+                        if is_last:
+                            fallback_payload["reply_markup"] = cockpit_markup
+                        res = await client.post(
+                            f"https://api.telegram.org/bot{creds['token']}/sendMessage",
+                            json=fallback_payload,
+                        )
+                return {"status": "DELIVERED", "http_code": res.status_code if res else 200}
         except Exception as exc:
             logger.warning("Telegram send_workflow_completed failed: %s", exc)
             return {"status": "ERROR", "error": str(exc)}
@@ -980,7 +990,18 @@ class ChannelGateway:
         """Convert Markdown (**bold**, `code`, ```blocks```, ### headings) to safe Telegram HTML."""
         if not text:
             return ""
-        escaped = html.escape(text, quote=False)
+        # Strip leaked <tool_call>/<tool_name>/<arg_key>/<arg_value> XML fragments first
+        clean = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL)
+        clean = re.sub(r"<tool_name>.*?</tool_name>", "", clean, flags=re.DOTALL)
+        clean = re.sub(r"<arg_key>.*?</arg_key>", "", clean, flags=re.DOTALL)
+        clean = re.sub(r"<arg_value>.*?</arg_value>", "", clean, flags=re.DOTALL)
+        clean = re.sub(r"corund[a-zA-Z]*>", "", clean)
+        clean = re.sub(r"<[^>]+>", "", clean)
+        # Escape HTML-special characters (&, <, >, ") first
+        escaped = html.escape(clean, quote=False)
+        # Convert Markdown links [label](https://...) to Telegram HTML <a href="https://...">label</a>
+        # html.escape does not escape [, ], (, ), so the regex still matches
+        escaped = re.sub(r"\[([^\]]+)\]\((https?://[^ )]+)\)", r'<a href="\2">\1</a>', escaped)
 
         # Fenced code blocks ```lang\n...\n```
         escaped = re.sub(

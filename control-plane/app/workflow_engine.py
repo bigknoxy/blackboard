@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -804,13 +805,21 @@ class WorkflowEngine:
         origin_channel = ctx.get("origin_channel")
         origin_chat_id = ctx.get("origin_chat_id")
 
+        def _clean_artifact(raw: str) -> str:
+            cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", raw or "", flags=re.DOTALL)
+            cleaned = re.sub(r"<tool_name>.*?</tool_name>", "", cleaned, flags=re.DOTALL)
+            cleaned = re.sub(r"<arg_key>.*?</arg_key>", "", cleaned, flags=re.DOTALL)
+            cleaned = re.sub(r"<arg_value>.*?</arg_value>", "", cleaned, flags=re.DOTALL)
+            cleaned = re.sub(r"corund[a-zA-Z]*>", "", cleaned)
+            cleaned = re.sub(r"<[^>]+>", "", cleaned)
+            cleaned = re.sub(r"\n?---\n?\*\*MCP Tool Invoked.*?```json.*?```", "", cleaned, flags=re.DOTALL)
+            cleaned = re.sub(r"\*\*MCP Tool Invoked.*?```json.*?```", "", cleaned, flags=re.DOTALL)
+            return cleaned.strip()
+
         summary_lines: List[str] = []
-        problem = (ctx.get("initial_prompt") or "").strip()
-        if problem:
-            summary_lines.append(f"**Goal:** {problem[:280]}")
-        verdict = ctx.get("last_verdict")
-        stage_info = f"{len(completed)} stage(s)" + (f" • Verdict: `{verdict}`" if verdict else "")
-        summary_lines.append(f"**Progress:** {stage_info}")
+        primary_deliverable: Optional[str] = None
+        research_links_section: Optional[str] = None
+        fallback_entries: List[Tuple[str, str, str]] = []
 
         try:
             filters = [
@@ -823,22 +832,43 @@ class WorkflowEngine:
                 select(BlackboardEntryModel)
                 .where(*filters)
                 .order_by(desc(BlackboardEntryModel.created_at), desc(BlackboardEntryModel.id))
-                .limit(5)
+                .limit(10)
             )
             entry_res = await session.execute(entry_stmt)
-            for ent in reversed(entry_res.scalars().all()):
-                snippet = (ent.content or "").strip().replace("\n", " ")
-                if len(snippet) > 400:
-                    snippet = snippet[:397] + "..."
-                if snippet:
-                    summary_lines.append(f"• **{ent.agent_id}** ({ent.entry_type}): {snippet}")
+            fetched = list(reversed(entry_res.scalars().all()))
+            for ent in fetched:
+                clean = _clean_artifact(ent.content or "")
+                if not clean:
+                    continue
+                if ent.agent_id == "operator":
+                    continue
+                if ent.agent_id == "architect" or (ent.entry_type == "spec" and ent.agent_id != "operator"):
+                    primary_deliverable = clean
+                elif ent.agent_id == "researcher" or ent.entry_type in ("research", "researcher"):
+                    if "http://" in clean or "https://" in clean or "**Web Search Results:**" in clean:
+                        research_links_section = clean
+                    if not primary_deliverable:
+                        primary_deliverable = clean
+                fallback_entries.append((ent.agent_id, ent.entry_type, clean))
         except Exception as exc:
-            logger.debug("Summary query failed at EndEvent: %s", exc)
+            logger.debug("Failed to fetch deliverable entries: %s", exc)
 
-        if len(summary_lines) <= 2 and not problem:
+        problem = (ctx.get("initial_prompt") or "").strip()
+        if primary_deliverable:
+            summary_lines.append(primary_deliverable)
+            if research_links_section and research_links_section != primary_deliverable:
+                if "http://" not in primary_deliverable and "https://" not in primary_deliverable:
+                    summary_lines.append(f"\n**Research & Links:**\n{research_links_section}")
+        else:
+            if problem:
+                summary_lines.append(f"**Goal:** {problem[:280]}")
+            for agent_id, entry_type, clean in fallback_entries[-3:]:
+                summary_lines.append(f"**{agent_id}** ({entry_type}):\n{clean}")
+
+        if not summary_lines:
             summary_lines.append(f"Completed workflow `{workflow.id}`.")
 
-        summary_text = "\n".join(summary_lines)
+        summary_text = "\n\n".join(summary_lines)
         try:
             session.add(
                 BlackboardEntryModel(

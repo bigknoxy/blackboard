@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -115,21 +116,85 @@ class StatelessAgentRunner:
                 blackboard_entries
             )
 
-            # 4. Construct Hydrated System & User Prompts
+            # 4. Pre-execute read-only web_search before LLM synthesis so real URLs ground the response
+            pre_tool_call = self._select_appropriate_tool(allowed_tools, task)
+            pre_web_search_block = ""
+            pre_executed_tool_id: Optional[str] = None
+            if pre_tool_call and pre_tool_call.get("tool_id") == "web_search":
+                # Extract clean operator query from initial_prompt or latest operator spec
+                raw_query = (task.get("initial_prompt") or "").strip()
+                if not raw_query:
+                    for b_ent in reversed(blackboard_entries):
+                        if b_ent.get("agent_id") == "operator" and b_ent.get("content"):
+                            raw_query = str(b_ent["content"]).strip()
+                            break
+                if not raw_query:
+                    raw_query = str(pre_tool_call.get("arguments", {}).get("query") or task_prompt)
+                # Strip leading "Run <workflow> to" boilerplate for cleaner web search
+                clean_query = re.sub(
+                    r"^(?:run|start|trigger|execute)\s+[a-z0-9_-]+\s+(?:to\s+)?",
+                    "",
+                    raw_query,
+                    flags=re.IGNORECASE,
+                ).strip()[:220]
+                try:
+                    ws_resp = await client.post(
+                        f"{CONTROL_PLANE_URL}/api/v1/tools/invoke",
+                        json={
+                            "agent_id": agent_id,
+                            "workflow_id": workflow_id,
+                            "task_id": task_id,
+                            "tool_id": "web_search",
+                            "arguments": {"query": clean_query},
+                            "bypass_approval": False,
+                        },
+                    )
+                    if ws_resp.status_code == 200:
+                        ws_data = ws_resp.json()
+                        raw_res = ws_data.get("result")
+                        ws_results = (
+                            raw_res.get("results", [])
+                            if isinstance(raw_res, dict)
+                            else (raw_res if isinstance(raw_res, list) else [])
+                        )
+                        bullet_lines = []
+                        for r in ws_results[:8]:
+                            if not isinstance(r, dict):
+                                continue
+                            title = r.get("title", "") or "Link"
+                            url = r.get("url", "")
+                            snippet = r.get("snippet", "")
+                            if url:
+                                bullet_lines.append(f"- [{title}]({url}): {snippet}")
+                            elif title or snippet:
+                                bullet_lines.append(f"- {title}: {snippet}")
+                        if bullet_lines:
+                            pre_web_search_block = "\n".join(bullet_lines)
+                        pre_executed_tool_id = "web_search"
+                except Exception as exc:
+                    logger.warning("Pre-LLM web_search failed: %s", exc)
+
+            # 5. Construct Hydrated System & User Prompts
             system_prompt = self._build_hydrated_system_prompt(
                 agent_cfg=agent_cfg,
                 prior_experience_block=prior_experience_block,
                 steering_notes=steering_notes,
             )
+            search_evidence_section = (
+                f"\n\n### Live Web Search Results (Cite These Real Links)\n{pre_web_search_block}"
+                if pre_web_search_block
+                else ""
+            )
             user_message = (
                 f"### Task Assignment (`{task_id}`)\n"
                 f"{task_prompt}\n\n"
                 f"### Shared Blackboard Context\n"
-                f"{artifact_context}\n\n"
-                f"Produce a concise `{entry_type}` artifact (under 250 words)."
+                f"{artifact_context}"
+                f"{search_evidence_section}\n\n"
+                f"Produce a clear, human-friendly, complete `{entry_type}` response that directly answers the operator's request."
             )
 
-            # 5. Query Configured Model Endpoint (Ollama / llama.cpp OpenAI / NVIDIA NIM)
+            # 6. Query Configured Model Endpoint (Ollama / llama.cpp OpenAI / NVIDIA NIM)
             llm_output, requested_tool_call, llm_source = await self._query_inference_endpoint(
                 client=client,
                 inference_config=agent_cfg.get("inference_config") or {},
@@ -139,9 +204,9 @@ class StatelessAgentRunner:
                 task=task,
             )
 
-            # 6. Route Tool Call via Centralized MCP Gateway (if requested)
+            # 7. Route Tool Call via Centralized MCP Gateway (skip if web_search already ran pre-LLM)
             tool_execution_summary = ""
-            if requested_tool_call:
+            if requested_tool_call and requested_tool_call.get("tool_id") != pre_executed_tool_id:
                 tool_id = requested_tool_call["tool_id"]
                 tool_args = requested_tool_call.get("arguments", {})
                 invoke_resp = await client.post(
@@ -177,12 +242,54 @@ class StatelessAgentRunner:
                             "task_id": task_id,
                             "hitl_ticket_id": invoke_data.get("hitl_ticket_id"),
                         }
-                    tool_execution_summary = (
-                        f"\n\n---\n**MCP Tool Invoked (`{tool_id}`):**\n"
-                        f"```json\n{json.dumps(invoke_data.get('result'), indent=2)}\n```"
-                    )
+                    # Format result based on tool type
+                    if tool_id == "web_search":
+                        raw_res = invoke_data.get("result")
+                        results = (
+                            raw_res.get("results", [])
+                            if isinstance(raw_res, dict)
+                            else (raw_res if isinstance(raw_res, list) else [])
+                        )
+                        bullet_lines = []
+                        for r in results:
+                            if not isinstance(r, dict):
+                                continue
+                            title = r.get("title", "") or "Link"
+                            url = r.get("url", "")
+                            snippet = r.get("snippet", "")
+                            if url:
+                                bullet_lines.append(f"- [{title}]({url}): {snippet}")
+                            elif title or snippet:
+                                bullet_lines.append(f"- {title}: {snippet}")
+                        tool_execution_summary = (
+                            "\n\n---\n**Web Search Results:**\n" + "\n".join(bullet_lines)
+                            if bullet_lines
+                            else ""
+                        )
+                    else:
+                        tool_execution_summary = (
+                            f"\n\n---\n**MCP Tool Invoked (`{tool_id}`):**\n"
+                            f"```json\n{json.dumps(invoke_data.get('result'), indent=2)}\n```"
+                        )
 
-            final_content = f"{llm_output}{tool_execution_summary}"
+            # Strip any leaked <tool_call>/<tool_name>/<arg_key>/<arg_value> XML from LLM output
+            clean_llm_output = re.sub(
+                r"<tool_call>.*?</tool_call>", "", llm_output, flags=re.DOTALL
+            )
+            clean_llm_output = re.sub(
+                r"<tool_name>.*?</tool_name>", "", clean_llm_output, flags=re.DOTALL
+            )
+            clean_llm_output = re.sub(r"<arg_key>.*?</arg_key>", "", clean_llm_output, flags=re.DOTALL)
+            clean_llm_output = re.sub(r"<arg_value>.*?</arg_value>", "", clean_llm_output, flags=re.DOTALL)
+            clean_llm_output = re.sub(r"corund[a-zA-Z]*>", "", clean_llm_output)
+            clean_llm_output = re.sub(r"</?(?:tool_call|tool_name|arg_key|arg_value)>", "", clean_llm_output).strip()
+
+            if pre_web_search_block and "http://" not in clean_llm_output and "https://" not in clean_llm_output:
+                tool_execution_summary = (
+                    f"{tool_execution_summary}\n\n**Verified Reference Links:**\n{pre_web_search_block}"
+                )
+
+            final_content = f"{clean_llm_output}{tool_execution_summary}"
 
             # 7. Commit Output Artifact to the Shared Blackboard
             bb_resp = await client.post(
@@ -694,7 +801,7 @@ class StatelessAgentRunner:
                             "stream": False,
                             "options": {
                                 "temperature": temperature,
-                                "num_predict": 24,
+                                "num_predict": 512,
                             },
                             "messages": [
                                 {"role": "system", "content": compact_sys},
@@ -710,7 +817,7 @@ class StatelessAgentRunner:
                     payload: Dict[str, Any] = {
                         "model": model_name,
                         "temperature": temperature,
-                        "max_tokens": 180 if provider == "nvidia_nim" else 140,
+                        "max_tokens": 1024 if provider == "nvidia_nim" else 768,
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_message},
@@ -875,8 +982,40 @@ class StatelessAgentRunner:
                         },
                     }
 
+        # Explicitly prioritize web_search regardless of list order in allowed_tools
+        # when the agent is researcher or the prompt asks for external research/products/links.
+        non_approval_tools = [t for t in allowed_tools if not t.get("requires_approval")]
+        tool_by_id = {t.get("id"): t for t in non_approval_tools if t.get("id")}
+        if "web_search" in tool_by_id and (
+            task.get("agent_id") == "researcher"
+            or any(
+                kw in prompt_lower
+                for kw in [
+                    "research",
+                    "product",
+                    "shopping",
+                    "link",
+                    "buy",
+                    "price",
+                    "hardware",
+                    "esp32",
+                    "tutorial",
+                    "compare",
+                ]
+            )
+        ):
+            query_text = (
+                task.get("initial_prompt")
+                or task.get("prompt")
+                or task.get("workflow_id", "core")
+            )
+            return {
+                "tool_id": "web_search",
+                "arguments": {"query": str(query_text)[:220]},
+            }
+
         # Pick first non-approval tool for automated verification
-        for tool in allowed_tools:
+        for tool in non_approval_tools:
             if not tool.get("requires_approval"):
                 tid = tool["id"]
                 if tid == "workflow_architect_validator":
@@ -898,6 +1037,13 @@ class StatelessAgentRunner:
                                 "  - id: e2\n    source: exec_node\n    target: end_node\n"
                             ),
                         },
+                    }
+                # Prioritize web_search for external research, product/shopping/link queries,
+                # or researcher agent when web_search is in allowed_tools
+                if tid == "web_search":
+                    return {
+                        "tool_id": tid,
+                        "arguments": {"query": task.get("prompt", task.get("workflow_id", "core"))},
                     }
                 if tid == "repo_search":
                     return {
