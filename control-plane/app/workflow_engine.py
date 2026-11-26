@@ -530,12 +530,15 @@ class WorkflowEngine:
         workflow: WorkflowModel,
         initial_prompt: str,
         context: Optional[Dict[str, Any]] = None,
+        initial_context: Optional[Dict[str, Any]] = None,
     ) -> WorkflowRunModel:
         """
         Create a WorkflowRun, post the initial specification/request to the Blackboard,
         and advance from StartEvent into the first executable node(s).
         """
         run_context = dict(context or {})
+        if initial_context:
+            run_context.update(initial_context)
         run_context["initial_prompt"] = initial_prompt
 
         run = WorkflowRunModel(
@@ -976,10 +979,7 @@ class WorkflowEngine:
             research_section = ""
 
             try:
-                from sqlalchemy import select as sa_select
-                from app.models import BlackboardEntryModel
-
-                stmt = sa_select(BlackboardEntryModel).where(
+                stmt = select(BlackboardEntryModel).where(
                     BlackboardEntryModel.workflow_id == workflow.id,
                     BlackboardEntryModel.entry_type != "summary",
                     BlackboardEntryModel.agent_id != "operator",
@@ -1006,7 +1006,7 @@ class WorkflowEngine:
                 verified_urls = ctx.get("verified_urls") or []
                 # Also check metadata from entries for verified_urls
                 try:
-                    stmt2 = sa_select(BlackboardEntryModel).where(
+                    stmt2 = select(BlackboardEntryModel).where(
                         BlackboardEntryModel.workflow_id == workflow.id,
                         BlackboardEntryModel.entry_type != "summary",
                     )
