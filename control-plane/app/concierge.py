@@ -43,7 +43,7 @@ from app.models import (
 from app.schemas import ConciergeChatRequest, ConciergeChatResponse, ToolInvokeRequest
 from app.workflow_engine import workflow_engine
 from app.database import get_redis
-
+from app.decision_engine import decision_engine
 logger = logging.getLogger("blackboard.concierge")
 
 LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.150:11434")
@@ -72,6 +72,51 @@ DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "qwen2.5-coder:0.5b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "768"))
 
+
+def evaluate_memory_worthiness(text: str) -> bool:
+    """Return whether content is a durable operator fact or preference."""
+    normalized = " ".join((text or "").strip().split())
+    lowered = normalized.lower()
+    if len(normalized) < 8 or lowered.endswith("?"):
+        return False
+    if lowered.startswith("web research"):
+        return True
+    durable_markers = (
+        "prefer",
+        "preferred",
+        "favorite",
+        "favourite",
+        "always ",
+        "never ",
+        "remember that",
+        "keep in mind",
+        "my timezone",
+        "my time zone",
+        "my location",
+        "my supplier",
+        "my subnet",
+        "is located",
+        "runs on",
+        "takes ",
+        "requires ",
+        "configured to",
+        "default to",
+    )
+    ephemeral_markers = (
+        "just this once",
+        "for now",
+        "right now",
+        "temporarily",
+        "this time",
+        "what happened",
+        "good morning",
+        "good evening",
+    )
+    if any(marker in lowered for marker in ephemeral_markers) and not any(
+        marker in lowered for marker in durable_markers
+    ):
+        return False
+    return any(marker in lowered for marker in durable_markers)
 
 async def compute_embedding(text_input: str) -> List[float]:
     """
@@ -1084,39 +1129,50 @@ class ConciergeAdminAgent:
             if not fact_text or len(fact_text) < 4:
                 fact_text = msg
 
-            emb = await compute_embedding(fact_text)
-            new_mem = AgentMemoryModel(
-                agent_id="concierge-admin",
-                memory_type="semantic",
-                content=fact_text,
-                embedding=emb,
+            mem_gate = await decision_engine.evaluate_memory_worthiness(
+                fact_text, explicit_request=True
             )
-            session.add(new_mem)
-            await session.commit()
-            await session.refresh(new_mem)
+            if not mem_gate.get("should_store", True):
+                tool_calls_executed.append({
+                    "tool": "store_memory",
+                    "agent_id": "concierge-admin",
+                    "content": fact_text,
+                    "status": "SKIPPED",
+                    "reason": mem_gate.get("reason") or "not_durable_operator_fact",
+                })
+            else:
+                emb = await compute_embedding(fact_text)
+                new_mem = AgentMemoryModel(
+                    agent_id="concierge-admin",
+                    memory_type="semantic",
+                    content=fact_text,
+                    embedding=emb,
+                )
+                session.add(new_mem)
+                await session.commit()
+                await session.refresh(new_mem)
 
-            r = get_redis()
-            if any(k in lowered for k in ["cst", "central"]):
-                await r.set("operator:timezone", "CST")
-            elif any(k in lowered for k in ["est", "eastern"]):
-                await r.set("operator:timezone", "EST")
-            elif any(k in lowered for k in ["pst", "pacific"]):
-                await r.set("operator:timezone", "PST")
-            elif any(k in lowered for k in ["mst", "mountain"]):
-                await r.set("operator:timezone", "MST")
+                r = get_redis()
+                if any(k in lowered for k in ["cst", "central"]):
+                    await r.set("operator:timezone", "CST")
+                elif any(k in lowered for k in ["est", "eastern"]):
+                    await r.set("operator:timezone", "EST")
+                elif any(k in lowered for k in ["pst", "pacific"]):
+                    await r.set("operator:timezone", "PST")
+                elif any(k in lowered for k in ["mst", "mountain"]):
+                    await r.set("operator:timezone", "MST")
 
-            if any(k in lowered for k in ["in ks", "kansas"]):
-                await r.set("operator:location", "KS")
+                if any(k in lowered for k in ["in ks", "kansas"]):
+                    await r.set("operator:location", "KS")
 
-            tool_calls_executed.append({
-                "tool": "store_memory",
-                "agent_id": "concierge-admin",
-                "memory_id": str(new_mem.id),
-                "content": fact_text,
-                "memory_type": "semantic",
-                "status": "STORED",
-            })
-
+                tool_calls_executed.append({
+                    "tool": "store_memory",
+                    "agent_id": "concierge-admin",
+                    "memory_id": str(new_mem.id),
+                    "content": fact_text,
+                    "memory_type": "semantic",
+                    "status": "STORED",
+                })
         # List & Inspect Stored Memories Intent
         if any(
             k in lowered for k in [
@@ -1201,8 +1257,9 @@ class ConciergeAdminAgent:
 
         # Stage 2: Lightweight Structured Intent Classifier (Archon orchestrator pattern)
         if len(tool_calls_executed) == 1 and len(msg.strip()) > 8:
-            available_wfs = [w["id"] for w in state_snapshot.get("workflows", [])]
-            decision = await self._classify_intent(msg, available_wfs)
+            available_wf_objs = state_snapshot.get("workflows", [])
+            available_wfs = [w["id"] for w in available_wf_objs]
+            decision = await self._classify_intent(msg, available_wf_objs)
             d_intent = decision.get("intent", "chat")
             d_conf = float(decision.get("confidence", 0.0))
             if d_intent == "trigger_workflow":
@@ -1252,6 +1309,36 @@ class ConciergeAdminAgent:
                         "routed_by": "intent_classifier",
                         "confidence": d_conf,
                         **bb_obs,
+                    }
+                )
+            elif d_intent == "memory_op" and d_conf >= CLASSIFIER_CONFIDENCE_HIGH:
+                mem_obs = await self._execute_concierge_tool(
+                    session,
+                    "search_memories",
+                    {"query": msg, "limit": 5},
+                    req.workflow_id or "code_review_pipeline",
+                )
+                tool_calls_executed.append(
+                    {
+                        "tool": "search_memories",
+                        "routed_by": "intent_classifier",
+                        "confidence": d_conf,
+                        **mem_obs,
+                    }
+                )
+            elif d_intent == "tool_exec" and d_conf >= CLASSIFIER_CONFIDENCE_HIGH:
+                web_obs = await self._execute_concierge_tool(
+                    session,
+                    "web_search",
+                    {"query": msg},
+                    req.workflow_id or "code_review_pipeline",
+                )
+                tool_calls_executed.append(
+                    {
+                        "tool": "web_search",
+                        "routed_by": "intent_classifier",
+                        "confidence": d_conf,
+                        **web_obs,
                     }
                 )
 
@@ -1522,6 +1609,13 @@ class ConciergeAdminAgent:
             target_agent = str(args.get("agent_id") or "concierge-admin").strip()
             if not content:
                 return {"tool": "store_memory", "status": "SKIPPED", "message": "Empty content"}
+            if not evaluate_memory_worthiness(content):
+                return {
+                    "tool": "store_memory",
+                    "status": "SKIPPED",
+                    "message": "Content is not a durable operator fact or preference.",
+                    "reason": "not_durable_operator_fact",
+                }
             if not await session.get(AgentModel, target_agent):
                 target_agent = "concierge-admin"
             emb = await compute_embedding(content)
@@ -2078,237 +2172,18 @@ class ConciergeAdminAgent:
         }
 
     async def _classify_intent(
-        self, user_msg: str, available_workflows: List[str]
+        self, user_msg: str, available_workflows: List[Any]
     ) -> Dict[str, Any]:
-        """
-        Lightweight structured decision classifier (Archon orchestrator pattern).
-        Supports runtime toggling (ON/OFF) and provider selection (`local` vs `gemini`)
-        via Redis (`llm:decision:*`) with automatic fallback to local LAN tiers.
-        """
-        valid_intents = {"trigger_workflow", "inspect_state", "memory_op", "tool_exec", "chat"}
-        fallback = {"intent": "chat", "workflow_id": None, "confidence": 0.0, "reason": "fallback"}
-
-        enabled = os.getenv("DECISION_MODEL_ENABLED", "true" if DECISION_MODEL_ENABLED else "false").lower() not in ("false", "0", "no")
-        provider = os.getenv("DECISION_MODEL_PROVIDER", DECISION_MODEL_PROVIDER).strip().lower()
-        gemini_api_key = os.getenv("GEMINI_API_KEY", GEMINI_API_KEY).strip()
-        gemini_model = os.getenv("GEMINI_DECISION_MODEL", GEMINI_DECISION_MODEL).strip() or "gemini-decision-1"
-
-        redis_client = None
-        try:
-            redis_client = await get_redis()
-            r_en = await redis_client.get("llm:decision:enabled")
-            if r_en is not None:
-                enabled = str(r_en).lower() not in ("false", "0", "no")
-            r_prov = await redis_client.get("llm:decision:provider")
-            if r_prov:
-                provider = str(r_prov).strip().lower()
-            r_key = await redis_client.get("llm:decision:gemini_api_key")
-            if r_key:
-                gemini_api_key = str(r_key).strip()
-            r_gmodel = await redis_client.get("llm:decision:gemini_model")
-            if r_gmodel:
-                gemini_model = str(r_gmodel).strip()
-        except Exception as exc:
-            logger.debug("Redis unavailable while loading decision model config: %s", exc)
-
-        if not enabled:
-            return {"intent": "chat", "workflow_id": None, "confidence": 0.0, "reason": "disabled"}
-
-        if provider == "gemini" and gemini_api_key:
-            in_cooldown = False
-            try:
-                if redis_client is not None:
-                    in_cooldown = bool(await redis_client.get("llm:cooldown:gemini_decision"))
-            except Exception:
-                in_cooldown = False
-
-            if not in_cooldown:
-                wf_criteria = {
-                    wf: f"Select `{wf}` when it best matches the operator's request."
-                    for wf in available_workflows
-                }
-                wf_criteria["none"] = "No workflow pipeline is needed."
-                model_ref = (
-                    gemini_model
-                    if gemini_model.startswith("models/")
-                    else f"models/{gemini_model}"
-                )
-                decision_payload = {
-                    "model": model_ref,
-                    "input": user_msg[:800],
-                    "questions": {
-                        "intent": {
-                            "type": "choice",
-                            "instructions": "Classify the operator request intent.",
-                            "criteria": {
-                                "trigger_workflow": "Run or start a multi-agent workflow pipeline (audit, review, research, shopping list, build, fix).",
-                                "inspect_state": "Inspect platform status, blackboard, backlog, or agents.",
-                                "memory_op": "Remember, recall, or search stored memories.",
-                                "tool_exec": "Execute shell command, web search, or weather lookup.",
-                                "chat": "General chat, greeting, or explanation.",
-                            },
-                        },
-                        "workflow_id": {
-                            "type": "choice",
-                            "instructions": "Select the target workflow_id if intent is trigger_workflow, otherwise none.",
-                            "criteria": wf_criteria,
-                        },
-                    },
-                }
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        resp = await client.post(
-                            f"https://generativelanguage.googleapis.com/v1beta/decisions?key={gemini_api_key}",
-                            json=decision_payload,
-                        )
-                    if resp.status_code == 429:
-                        logger.warning("Gemini Decisions API returned 429; setting 60s cooldown and falling back to local.")
-                        try:
-                            if redis_client is not None:
-                                await redis_client.setex("llm:cooldown:gemini_decision", 60, "429")
-                        except Exception:
-                            pass
-                    elif resp.status_code == 200:
-                        parsed_decision = self._parse_gemini_decision_response(
-                            resp.json() or {}, available_workflows, valid_intents
-                        )
-                        if parsed_decision is not None:
-                            return parsed_decision
-                    else:
-                        logger.warning(
-                            "Gemini Decisions API returned HTTP %s; falling back to local.",
-                            resp.status_code,
-                        )
-                except Exception as exc:
-                    logger.warning("Gemini Decisions API call failed (%s); falling back to local.", exc)
-
-        system_prompt = (
-            "You are a fast intent classifier for a multi-agent workflow system.\n"
-            f"Available workflows: {json.dumps(available_workflows)}\n"
-            "Classify the user message into STRICT JSON with keys:\n"
-            '{"intent": "trigger_workflow|inspect_state|memory_op|tool_exec|chat", '
-            '"workflow_id": "<exact workflow id or null>", "confidence": 0.0-1.0}\n'
-            "Rules:\n"
-            "- trigger_workflow: user wants to run/start/build/review/fix/research via a pipeline.\n"
-            "- inspect_state: user asks about current status, blackboard, backlog, or agents.\n"
-            "- memory_op: user asks to remember, recall, or search memories.\n"
-            "- tool_exec: user asks to run a shell command, web search, or weather lookup.\n"
-            "- chat: greetings, explanations, or general questions.\n"
-            "Output ONLY valid JSON."
+        """Classify operator intent through the shared Decision Engine."""
+        redis_client = get_redis()
+        if hasattr(redis_client, "__await__"):
+            redis_client = await redis_client
+        return await decision_engine.route_intent(
+            user_msg,
+            available_workflows,
+            redis_client=redis_client,
+            gate_name="concierge_router",
         )
-        laptop_lfm_url = os.getenv("LAN_LAPTOP_LFM_URL") or LAN_LAPTOP_LFM_URL
-        endpoints: List[Tuple[str, str]] = []
-        for url, model in [
-            (CLASSIFIER_OPENAI_URL, CLASSIFIER_MODEL),
-            (laptop_lfm_url, CLASSIFIER_MODEL),
-            (CONCIERGE_OPENAI_URL, CONCIERGE_MODEL),
-        ]:
-            if url and url not in {u for u, _ in endpoints}:
-                endpoints.append((url, model))
-
-        for base_url, model_name in endpoints:
-            try:
-                async with httpx.AsyncClient(timeout=3.5) as client:
-                    resp = await client.post(
-                        f"{base_url.rstrip('/')}/chat/completions",
-                        json={
-                            "model": model_name,
-                            "temperature": 0.0,
-                            "max_tokens": 160,
-                            "chat_template_kwargs": {"enable_thinking": False},
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_msg[:800]},
-                            ],
-                        },
-                    )
-                    if resp.status_code != 200:
-                        continue
-                    choices = (resp.json() or {}).get("choices") or []
-                    if not choices:
-                        continue
-                    raw = ((choices[0].get("message") or {}).get("content") or "").strip()
-                    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-                    parsed = json.loads(cleaned)
-                    intent = str(parsed.get("intent") or "chat").strip()
-                    if intent not in valid_intents:
-                        intent = "chat"
-                    wf = parsed.get("workflow_id")
-                    wf_str = str(wf).strip() if wf and str(wf).strip() in available_workflows else None
-                    conf = max(0.0, min(1.0, float(parsed.get("confidence") or 0.0)))
-                    return {"intent": intent, "workflow_id": wf_str, "confidence": conf}
-            except Exception as exc:
-                logger.debug("Classifier call to %s failed: %s", base_url, exc)
-                continue
-
-        # Local Ollama fallback (e.g. 192.168.8.136:11434) when llama.cpp nodes are offline
-        ollama_url = (os.getenv("LOCAL_OLLAMA_URL") or LOCAL_OLLAMA_URL or "").rstrip("/")
-        if ollama_url:
-            configured_ollama_model = os.getenv("OLLAMA_CLASSIFIER_MODEL", "qwen3.5:0.8b")
-            try:
-                if redis_client is not None:
-                    r_om = await redis_client.get("llm:decision:ollama_model")
-                    if r_om:
-                        configured_ollama_model = str(r_om).strip()
-            except Exception:
-                pass
-            if configured_ollama_model:
-                # Ultra-compact 1-token indexed classifier for CPU-only Ollama nodes
-                option_map: Dict[str, Tuple[str, Optional[str]]] = {}
-                option_lines: List[str] = []
-                idx = 1
-                for wf in available_workflows:
-                    option_map[str(idx)] = ("trigger_workflow", wf)
-                    option_lines.append(f"{idx} = run workflow {wf}")
-                    idx += 1
-                static_options = [
-                    ("inspect_state", "inspect platform status, blackboard, backlog, or agents"),
-                    ("memory_op", "remember, recall, or search stored memories"),
-                    ("tool_exec", "run shell command, web search, weather, or time"),
-                    ("chat", "greeting, general question, or conversation"),
-                ]
-                for intent_name, desc in static_options:
-                    option_map[str(idx)] = (intent_name, None)
-                    option_lines.append(f"{idx} = {intent_name} ({desc})")
-                    idx += 1
-                compact_sys = (
-                    "Classify the user request. Reply with ONLY ONE number:\n"
-                    + "\n".join(option_lines)
-                    + f"\nReply with just a single digit (1-{idx - 1})."
-                )
-                try:
-                    async with httpx.AsyncClient(timeout=25.0) as client:
-                        resp = await client.post(
-                            f"{ollama_url}/api/chat",
-                            json={
-                                "model": configured_ollama_model,
-                                "stream": False,
-                                "think": False,
-                                "options": {"temperature": 0.0, "num_predict": 4},
-                                "messages": [
-                                    {"role": "system", "content": compact_sys},
-                                    {"role": "user", "content": user_msg[:500]},
-                                ],
-                            },
-                        )
-                    if resp.status_code == 200:
-                        raw = (((resp.json() or {}).get("message") or {}).get("content") or "").strip()
-                        digit_match = re.search(r"\b(\d+)\b", raw)
-                        if digit_match and digit_match.group(1) in option_map:
-                            chosen_intent, chosen_wf = option_map[digit_match.group(1)]
-                            return {
-                                "intent": chosen_intent,
-                                "workflow_id": chosen_wf,
-                                "confidence": 0.8,
-                                "provider": f"ollama:{configured_ollama_model}",
-                            }
-                except Exception as exc:
-                    logger.debug(
-                        "Ollama classifier call (%s) failed: %s",
-                        configured_ollama_model,
-                        exc,
-                    )
-        return fallback
 
     async def _try_ollama_chat(
         self,
@@ -2377,39 +2252,61 @@ class ConciergeAdminAgent:
                 ),
             },
         ]
+        # Complexity-aware tier routing: escalate complex_reasoning directly to NIM when local
+        # is not strictly forced, conserving NIM RPM quota for hard turns.
         try:
-            async with httpx.AsyncClient(timeout=18.0) as client:
-                req_body = {
-                    "model": CONCIERGE_MODEL,
-                    "temperature": 0.2,
-                    "max_tokens": 1024,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                    "tools": self.OPENAI_TOOLS,
-                    "tool_choice": "auto",
-                    "messages": messages_payload,
-                }
-                resp = await client.post(
-                    f"{CONCIERGE_OPENAI_URL.rstrip('/')}/chat/completions",
-                    json=req_body,
+            complexity = await decision_engine.classify_complexity(user_msg)
+        except Exception:
+            complexity = "simple_local"
+
+        skip_local_first = False
+        if complexity == "complex_reasoning":
+            try:
+                r_pref = await get_redis()
+                pref_val = await r_pref.get("llm:config:prefer_local")
+                nim_key_avail = bool(
+                    await r_pref.get("llm:config:nim_api_key")
+                    or os.getenv("NVIDIA_NIM_API_KEY", "")
                 )
-                if resp.status_code == 400:
-                    req_body.pop("tools", None)
-                    req_body.pop("tool_choice", None)
+                if nim_key_avail and str(pref_val or "").lower() == "false":
+                    skip_local_first = True
+            except Exception:
+                pass
+
+        if not skip_local_first:
+            try:
+                async with httpx.AsyncClient(timeout=18.0) as client:
+                    req_body = {
+                        "model": CONCIERGE_MODEL,
+                        "temperature": 0.2,
+                        "max_tokens": 1024,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "tools": self.OPENAI_TOOLS,
+                        "tool_choice": "auto",
+                        "messages": messages_payload,
+                    }
                     resp = await client.post(
                         f"{CONCIERGE_OPENAI_URL.rstrip('/')}/chat/completions",
                         json=req_body,
                     )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    choices = data.get("choices") or []
-                    if choices:
-                        msg_obj = choices[0].get("message") or {}
-                        native_calls = self._extract_native_tool_calls(msg_obj)
-                        content = msg_obj.get("content") or msg_obj.get("reasoning_content")
-                        if content or native_calls:
-                            return (content.strip() if content else None), native_calls
-        except Exception as exc:
-            logger.warning("Concierge local LLM call failed (%s); checking NIM fallback.", exc)
+                    if resp.status_code == 400:
+                        req_body.pop("tools", None)
+                        req_body.pop("tool_choice", None)
+                        resp = await client.post(
+                            f"{CONCIERGE_OPENAI_URL.rstrip('/')}/chat/completions",
+                            json=req_body,
+                        )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        choices = data.get("choices") or []
+                        if choices:
+                            msg_obj = choices[0].get("message") or {}
+                            native_calls = self._extract_native_tool_calls(msg_obj)
+                            content = msg_obj.get("content") or msg_obj.get("reasoning_content")
+                            if content or native_calls:
+                                return (content.strip() if content else None), native_calls
+            except Exception as exc:
+                logger.warning("Concierge local LLM call failed (%s); checking NIM fallback.", exc)
 
         # Fallback to NVIDIA NIM free endpoint if API key is configured
         try:

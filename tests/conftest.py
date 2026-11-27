@@ -91,6 +91,15 @@ class InMemoryAsyncRedis:
             entry = self._kv.get(key)
             return entry[0] if entry else None
 
+    async def mget(self, *keys: str) -> List[Optional[str]]:
+        async with self._lock:
+            values: List[Optional[str]] = []
+            for key in keys:
+                self._purge_expired(key)
+                entry = self._kv.get(key)
+                values.append(entry[0] if entry else None)
+            return values
+
     async def delete(self, key: str) -> int:
         async with self._lock:
             self._purge_expired(key)

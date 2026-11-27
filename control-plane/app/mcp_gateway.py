@@ -1112,6 +1112,51 @@ class MCPToolboxGateway:
                 message=f"Tool '{req.tool_id}' is not registered in MCP Gateway.",
             )
 
+        # Decision Engine Bash/Shell Risk Triage (blocks catastrophic destructive commands
+        # immediately and enriches HITL tickets with risk metadata; preserves Invariants 4 & 16).
+        risk_assessment: Optional[Dict[str, Any]] = None
+        is_shell_tool = tool.id == "bash_executor" or bool(
+            (tool.endpoint_config or {}).get("bash_command")
+        )
+        if is_shell_tool:
+            from app.decision_engine import decision_engine
+
+            shell_cmd = str(
+                (req.arguments or {}).get("command")
+                or (tool.endpoint_config or {}).get("bash_command")
+                or ""
+            ).strip()
+            if shell_cmd:
+                risk_assessment = await decision_engine.assess_command_risk(
+                    shell_cmd, tool_id=tool.id
+                )
+                if risk_assessment.get("risk_level") == "destructive_block":
+                    alert_content = (
+                        f"SECURITY ALERT (Destructive Command Blocked): Agent '{req.agent_id}' "
+                        f"attempted destructive command via '{tool.id}': `{shell_cmd[:200]}`"
+                    )
+                    session.add(
+                        BlackboardEntryModel(
+                            workflow_id=req.workflow_id,
+                            task_id=req.task_id,
+                            agent_id="mcp-security-guard",
+                            entry_type="critique",
+                            content=alert_content,
+                            metadata_={
+                                "security_alert": True,
+                                "risk_assessment": risk_assessment,
+                                "attempted_tool": tool.id,
+                                "offending_agent": req.agent_id,
+                            },
+                        )
+                    )
+                    await session.commit()
+                    return ToolInvokeResponse(
+                        status="DENIED",
+                        message=alert_content,
+                        result={"risk_assessment": risk_assessment},
+                    )
+
         # Check active auto-approval policies (Invariant 16)
         auto_approved = False
         auto_approve_policy_matched = None
@@ -1149,13 +1194,16 @@ class MCPToolboxGateway:
                         break
 
         if tool.requires_approval and not req.bypass_approval and not auto_approved:
+            ticket_args = dict(req.arguments or {})
+            if risk_assessment is not None:
+                ticket_args["_risk_assessment"] = risk_assessment
             ticket = HITLTicketModel(
                 workflow_id=req.workflow_id,
                 task_id=req.task_id,
                 agent_id=req.agent_id,
                 gate_type="tool_approval",
                 tool_id=tool.id,
-                tool_arguments=req.arguments,
+                tool_arguments=ticket_args,
                 status="PENDING",
             )
             session.add(ticket)
