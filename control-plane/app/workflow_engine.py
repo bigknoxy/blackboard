@@ -648,12 +648,82 @@ class WorkflowEngine:
             return
 
         if ntype == "ExclusiveGateway":
+            verdict = run.context.get("last_verdict", "PASS")
+            if node.get("semantic_gate") or node.get("criteria"):
+                from app.decision_engine import decision_engine
+
+                latest_stmt = (
+                    select(BlackboardEntryModel)
+                    .where(BlackboardEntryModel.workflow_id == workflow.id)
+                    .order_by(BlackboardEntryModel.created_at.desc())
+                    .limit(1)
+                )
+                latest_res = await session.execute(latest_stmt)
+                latest_entry = latest_res.scalar_one_or_none()
+                artifact_text = (
+                    latest_entry.content
+                    if latest_entry is not None
+                    else str(run.context.get("last_output") or "")
+                )
+                gate_res = await decision_engine.evaluate_gateway_verdict(
+                    criteria=str(
+                        node.get("criteria")
+                        or f"Verify deliverable for gateway '{node.get('name', nid)}'."
+                    ),
+                    artifact=artifact_text,
+                    fallback_verdict=str(verdict),
+                    gate_name=f"workflow_gateway:{nid}",
+                )
+                verdict = gate_res.get("verdict") or verdict
+                ctx = dict(run.context or {})
+                ctx["last_verdict"] = verdict
+                ctx["last_gateway_decision"] = gate_res
+                run.context = ctx
+                session.add(
+                    BlackboardEntryModel(
+                        workflow_id=workflow.id,
+                        task_id=f"run-{run.id}-{nid}",
+                        agent_id="decision-engine",
+                        entry_type="test_result" if verdict == "PASS" else "critique",
+                        content=(
+                            f"⚖️ Semantic Gateway '{node.get('name', nid)}' verdict: "
+                            f"**{verdict}** (conf={gate_res.get('confidence', 0.0):.2f}, "
+                            f"provider={gate_res.get('provider', 'fallback')})"
+                        ),
+                        metadata_={
+                            "gateway_node_id": nid,
+                            "verdict": verdict,
+                            "decision": gate_res,
+                        },
+                    )
+                )
+                await session.flush()
+
+                if verdict == "ESCALATE_HITL":
+                    current = list(run.current_nodes or [])
+                    if nid not in current:
+                        current.append(nid)
+                    run.current_nodes = current
+                    run.status = "AWAITING_APPROVAL"
+                    ticket = HITLTicketModel(
+                        workflow_id=workflow.id,
+                        task_id=f"run-{run.id}-{nid}",
+                        agent_id="decision-engine",
+                        gate_type="workflow_gateway_escalation",
+                        tool_id=nid,
+                        tool_arguments={"verdict": verdict, "decision": gate_res},
+                        status="PENDING",
+                    )
+                    session.add(ticket)
+                    await session.commit()
+                    return
+
             await self.advance_from_node(
                 session,
                 workflow,
                 run,
                 nid,
-                branch_outcome=run.context.get("last_verdict", "PASS"),
+                branch_outcome=verdict,
             )
             return
 

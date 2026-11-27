@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.concierge import compute_embedding, concierge_agent
 from app.database import AsyncSessionLocal, get_db, get_redis, init_db
+from app.decision_engine import decision_engine
 from app.graph import BlackboardGraphEngine, GraphCycleException
 from app.mcp_gateway import mcp_gateway
 from app.optimizer import (
@@ -1731,6 +1732,7 @@ async def get_llm_router_status() -> Dict[str, Any]:
             "ollama_classifier_model": ollama_classifier_model,
             "ollama_url": os.getenv("LOCAL_OLLAMA_URL", "http://192.168.8.136:11434"),
             "local_endpoints": local_decision_endpoints,
+            "telemetry": await decision_engine.get_telemetry(redis_client=redis_client),
         },
         "nvidia_nim": {
             "base_url": os.getenv(
