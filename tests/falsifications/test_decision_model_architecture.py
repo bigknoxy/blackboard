@@ -56,7 +56,8 @@ async def _ensure_agents_and_workflows(db_session):
         ("coder", "Coder", ["bash_executor"]),
         ("researcher", "Researcher", ["web_search"]),
     ]:
-        if not await db_session.get(AgentModel, ag_id):
+        existing = await db_session.get(AgentModel, ag_id)
+        if not existing:
             db_session.add(
                 AgentModel(
                     id=ag_id,
@@ -65,6 +66,11 @@ async def _ensure_agents_and_workflows(db_session):
                     allowed_tools=tools,
                 )
             )
+        else:
+            if ag_id == "coder" and "bash_executor" not in (existing.allowed_tools or []):
+                existing.allowed_tools = list(existing.allowed_tools or []) + ["bash_executor"]
+            elif ag_id == "researcher" and "bash_executor" in (existing.allowed_tools or []):
+                existing.allowed_tools = [t for t in existing.allowed_tools if t != "bash_executor"]
     minimal_graph = {
         "nodes": [
             {"id": "s", "name": "Start", "type": "StartEvent"},
