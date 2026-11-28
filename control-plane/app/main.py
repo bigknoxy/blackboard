@@ -91,12 +91,19 @@ from app.schemas import (
     ToolInvokeRequest,
     ToolInvokeResponse,
     WorkflowCreate,
+    WorkflowPreflightRequest,
+    WorkflowPreflightResponse,
     WorkflowResponse,
     WorkflowRunResponse,
     WorkflowTriggerRequest,
     WorkflowUpdate,
 )
-from app.workflow_engine import REDIS_EVENTS_CHANNEL, workflow_engine
+from app.workflow_engine import (
+    REDIS_EVENTS_CHANNEL,
+    WORKFLOW_CONTRACT_FIELDS,
+    preflight_check_workflow,
+    workflow_engine,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -192,6 +199,24 @@ async def seed_initial_state() -> None:
                     "workflow_activator",
                 ],
                 "subscribed_events": ["workflow.started", "spec.requested"],
+            },
+            {
+                "id": "researcher",
+                "name": "Principal Technical Researcher",
+                "role": "Technical Researcher & Documentation Scout",
+                "system_prompt": (
+                    "You are the Principal Technical Researcher. Gather grounded external evidence, "
+                    "preserve source links, and publish concise research findings."
+                ),
+                "inference_config": {
+                    "provider": "openai",
+                    "model_name": "qwen3-4b",
+                    "base_url": "http://192.168.1.180:8081/v1",
+                    "api_key": None,
+                    "temperature": 0.2,
+                },
+                "allowed_tools": ["web_search", "repo_search"],
+                "subscribed_events": ["spec.requested", "research.requested"],
             },
             {
                 "id": "coder",
@@ -345,10 +370,7 @@ async def seed_initial_state() -> None:
                 seen_wf_ids.add(wf_id)
                 existing_wf = await session.get(WorkflowModel, wf_id)
                 if not existing_wf:
-                    state_graph = {
-                        "nodes": parsed["nodes"],
-                        "edges": parsed["edges"],
-                    }
+                    state_graph = workflow_engine.normalize_state_graph(parsed)
                     bpmn_xml = workflow_engine.graph_to_bpmn_xml(
                         wf_id, parsed["name"], state_graph
                     )
@@ -830,13 +852,16 @@ async def create_workflow(
     bpmn_xml = payload.bpmn_xml
 
     if payload.state_graph:
-        state_graph = payload.state_graph.model_dump()
+        state_graph = payload.state_graph.model_dump(exclude_unset=True)
     elif yaml_source:
         parsed = workflow_engine.parse_yaml_to_graph(yaml_source)
-        state_graph = {"nodes": parsed["nodes"], "edges": parsed["edges"]}
+        state_graph = workflow_engine.normalize_state_graph(parsed)
     elif bpmn_xml:
         state_graph = workflow_engine.bpmn_xml_to_graph(bpmn_xml)
 
+    for field in WORKFLOW_CONTRACT_FIELDS:
+        if field in payload.model_fields_set:
+            state_graph[field] = getattr(payload, field)
     state_graph = workflow_engine.ensure_lifecycle_events(state_graph)
 
     if not yaml_source:
@@ -908,12 +933,17 @@ async def update_workflow(
     elif payload.yaml_source is not None:
         wf.yaml_source = payload.yaml_source
         parsed = workflow_engine.parse_yaml_to_graph(payload.yaml_source)
-        wf.state_graph = {"nodes": parsed["nodes"], "edges": parsed["edges"]}
+        wf.state_graph = workflow_engine.normalize_state_graph(parsed)
         wf.bpmn_xml = workflow_engine.graph_to_bpmn_xml(
             wf.id, wf.name, wf.state_graph
         )
     elif payload.state_graph is not None:
-        wf.state_graph = payload.state_graph.model_dump()
+        wf.state_graph = payload.state_graph.model_dump(exclude_unset=True)
+
+    for field in WORKFLOW_CONTRACT_FIELDS:
+        if field in payload.model_fields_set:
+            wf.state_graph = dict(wf.state_graph or {})
+            wf.state_graph[field] = getattr(payload, field)
 
     if wf.state_graph:
         wf.state_graph = workflow_engine.ensure_lifecycle_events(wf.state_graph)
@@ -973,7 +1003,7 @@ async def convert_workflow_representation(
 
     if payload.get("yaml_source"):
         parsed = workflow_engine.parse_yaml_to_graph(payload["yaml_source"])
-        graph = {"nodes": parsed["nodes"], "edges": parsed["edges"]}
+        graph = workflow_engine.normalize_state_graph(parsed)
         bpmn_xml = workflow_engine.graph_to_bpmn_xml(
             parsed.get("id", wf_id), parsed.get("name", name), graph
         )
@@ -991,6 +1021,21 @@ async def convert_workflow_representation(
         ),
         "bpmn_xml": workflow_engine.graph_to_bpmn_xml(wf_id, name, graph),
     }
+
+
+@app.post(
+    "/api/v1/workflows/preflight",
+    response_model=WorkflowPreflightResponse,
+)
+async def preflight_workflow(
+    payload: WorkflowPreflightRequest,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    return await preflight_check_workflow(
+        session,
+        payload.workflow_id,
+        required_capabilities=payload.required_capabilities,
+    )
 
 
 @app.post(

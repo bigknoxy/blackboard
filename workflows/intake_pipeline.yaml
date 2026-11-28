@@ -4,6 +4,29 @@ description: >
   Autonomous intake pipeline for new feature requests, architectural ideas, and system backlog:
   Architect evaluates feasibility and spec -> Security Auditor assesses boundaries & RBAC ->
   Operator signs off on priority and sprint readiness.
+capability_tags:
+  - idea_intake
+  - architecture
+  - security_review
+  - backlog
+  - rbac
+required_tools:
+  - repo_search
+  - ast_complexity_analyzer
+  - static_security_scanner
+input_contract:
+  type: feature_request
+  source_type: query_keyword
+  required_fields:
+    - idea
+    - context
+output_contract:
+  type: prioritized_backlog_specification
+  target_type: security_audit_report
+  required_fields:
+    - feasibility
+    - security_findings
+    - priority
 nodes:
   - id: start_intake_pipeline
     name: Idea Intake Triggered
@@ -14,6 +37,9 @@ nodes:
     type: ServiceTask
     agent_id: architect
     entry_type: spec
+    required_tools:
+      - repo_search
+      - ast_complexity_analyzer
     prompt_template: >
       Analyze the proposed idea, backlog item, or feature request.
       Assess architectural feasibility against AGENTS.md system invariants.
@@ -25,6 +51,9 @@ nodes:
     type: ServiceTask
     agent_id: sec-auditor
     entry_type: critique
+    required_tools:
+      - ast_complexity_analyzer
+      - static_security_scanner
     prompt_template: >
       Audit the proposed feature specification from a security and least-privilege standpoint.
       Identify potential attack vectors, credential exposure risks, unauthorized tool invocation pathways,

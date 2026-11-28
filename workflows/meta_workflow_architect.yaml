@@ -3,6 +3,29 @@ name: Meta-Workflow & Agent Architect Pipeline
 description: >
   Self-governing system pipeline: Architect synthesizes new workflow/agent spec ->
   Security Auditor verifies RBAC & safety boundaries -> Operator HITL Review & Activation.
+capability_tags:
+  - workflow_architecture
+  - agent_design
+  - rbac
+  - workflow_validation
+  - activation
+required_tools:
+  - workflow_architect_validator
+  - ast_complexity_analyzer
+  - static_security_scanner
+  - workflow_activator
+input_contract:
+  type: workflow_design_request
+  source_type: yaml_workflow_spec
+  required_fields:
+    - workflow_requirements
+output_contract:
+  type: validated_active_workflow
+  target_type: active_workflow_runtime
+  required_fields:
+    - validated_workflow
+    - security_findings
+    - operator_approval
 nodes:
   - id: start_meta_pipeline
     name: Meta-Architecture Triggered
@@ -13,6 +36,9 @@ nodes:
     type: ServiceTask
     agent_id: architect
     entry_type: spec
+    required_tools:
+      - workflow_architect_validator
+      - workflow_activator
     prompt_template: >
       Synthesize a rigorous, validated YAML state graph for the requested multi-agent workflow
       or agent definition. Ensure all node types are valid (StartEvent, ServiceTask, ParallelGateway,
@@ -23,6 +49,9 @@ nodes:
     type: ServiceTask
     agent_id: sec-auditor
     entry_type: critique
+    required_tools:
+      - ast_complexity_analyzer
+      - static_security_scanner
     prompt_template: >
       Audit the proposed workflow graph and agent permissions. Check for recursive loops,
       unauthorized privilege escalation, missing HITL checkpoints on dangerous actions,

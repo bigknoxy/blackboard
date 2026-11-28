@@ -239,6 +239,10 @@ class WorkflowNode(BaseModel):
     verify_command: Optional[str] = None
     verify_mode: Optional[str] = None
     max_iterations: Optional[int] = 3
+    capability_tags: List[str] = Field(default_factory=list)
+    required_tools: List[str] = Field(default_factory=list)
+    input_contract: Dict[str, Any] = Field(default_factory=dict)
+    output_contract: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowEdge(BaseModel):
@@ -251,6 +255,10 @@ class WorkflowEdge(BaseModel):
 class WorkflowStateGraph(BaseModel):
     nodes: List[WorkflowNode] = Field(default_factory=list)
     edges: List[WorkflowEdge] = Field(default_factory=list)
+    capability_tags: List[str] = Field(default_factory=list)
+    required_tools: List[str] = Field(default_factory=list)
+    input_contract: Dict[str, Any] = Field(default_factory=dict)
+    output_contract: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowCreate(BaseModel):
@@ -260,6 +268,10 @@ class WorkflowCreate(BaseModel):
     state_graph: Optional[WorkflowStateGraph] = None
     yaml_source: Optional[str] = None
     bpmn_xml: Optional[str] = None
+    capability_tags: List[str] = Field(default_factory=list)
+    required_tools: List[str] = Field(default_factory=list)
+    input_contract: Dict[str, Any] = Field(default_factory=dict)
+    output_contract: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowUpdate(BaseModel):
@@ -268,6 +280,10 @@ class WorkflowUpdate(BaseModel):
     state_graph: Optional[WorkflowStateGraph] = None
     yaml_source: Optional[str] = None
     bpmn_xml: Optional[str] = None
+    capability_tags: Optional[List[str]] = None
+    required_tools: Optional[List[str]] = None
+    input_contract: Optional[Dict[str, Any]] = None
+    output_contract: Optional[Dict[str, Any]] = None
 
 
 class WorkflowResponse(BaseModel):
@@ -277,10 +293,34 @@ class WorkflowResponse(BaseModel):
     state_graph: Dict[str, Any]
     yaml_source: Optional[str] = None
     bpmn_xml: Optional[str] = None
+    capability_tags: List[str] = Field(default_factory=list)
+    required_tools: List[str] = Field(default_factory=list)
+    input_contract: Dict[str, Any] = Field(default_factory=dict)
+    output_contract: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class WorkflowPreflightRequest(BaseModel):
+    workflow_id: str = Field(..., min_length=1, max_length=128)
+    required_capabilities: List[str] = Field(default_factory=list)
+
+
+class PreflightResult(BaseModel):
+    workflow_id: str
+    workflow_exists: bool
+    ready: bool
+    missing_tools: List[str] = Field(default_factory=list)
+    rbac_gaps: List[Dict[str, Any]] = Field(default_factory=list)
+    missing_agents: List[str] = Field(default_factory=list)
+    tool_chain_valid: bool
+    missing_capabilities: List[str] = Field(default_factory=list)
+    tool_chain: Optional[List[str]] = None
+
+
+WorkflowPreflightResponse = PreflightResult
 
 
 class WorkflowTriggerRequest(BaseModel):

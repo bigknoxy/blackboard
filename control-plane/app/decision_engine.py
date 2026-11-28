@@ -40,6 +40,7 @@ DECISION_INTENTS = (
 )
 GATEWAY_VERDICTS = ("PASS", "REWORK", "ESCALATE_HITL")
 COMPLEXITY_CLASSES = ("simple_local", "complex_reasoning")
+WORKFLOW_MATCH_STATUSES = ("MATCH", "NO_MATCH", "NEEDS_CLARIFICATION")
 
 DEFAULT_OLLAMA_URL = "http://192.168.8.136:11434"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:0.8b"
@@ -213,6 +214,319 @@ class DecisionEngine:
             workflow_ids.append(workflow_id)
             criteria[workflow_id] = description or workflow_id
         return workflow_ids, criteria
+
+    @staticmethod
+    def _contract_list(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @staticmethod
+    def _workflow_match_record(workflow: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(workflow, Mapping):
+            workflow_id = str(workflow.get("id") or "").strip()
+            name = str(workflow.get("name") or "").strip()
+            description = str(workflow.get("description") or "").strip()
+            state_graph = workflow.get("state_graph") or {}
+        else:
+            workflow_id = str(getattr(workflow, "id", "") or "").strip()
+            name = str(getattr(workflow, "name", "") or "").strip()
+            description = str(getattr(workflow, "description", "") or "").strip()
+            state_graph = getattr(workflow, "state_graph", {}) or {}
+        if hasattr(state_graph, "model_dump"):
+            state_graph = state_graph.model_dump()
+        if not isinstance(state_graph, Mapping):
+            state_graph = {}
+        if not workflow_id:
+            return None
+        contract_source = workflow if isinstance(workflow, Mapping) else state_graph
+
+        def contract_value(field: str) -> Any:
+            value = contract_source.get(field)
+            if value is None:
+                value = state_graph.get(field)
+            return value
+
+        def contract_dict(field: str) -> Dict[str, Any]:
+            value = contract_value(field)
+            return dict(value) if isinstance(value, Mapping) else {}
+
+        return {
+            "id": workflow_id,
+            "name": name,
+            "description": description,
+            "capability_tags": DecisionEngine._contract_list(
+                contract_value("capability_tags")
+            ),
+            "required_tools": DecisionEngine._contract_list(
+                contract_value("required_tools")
+            ),
+            "input_contract": contract_dict("input_contract"),
+            "output_contract": contract_dict("output_contract"),
+        }
+
+    @staticmethod
+    def _tool_match_record(tool: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(tool, Mapping):
+            tool_id = str(tool.get("id") or "").strip()
+            consumes_type = tool.get("consumes_type")
+            produces_type = tool.get("produces_type")
+        else:
+            tool_id = str(getattr(tool, "id", "") or "").strip()
+            consumes_type = getattr(tool, "consumes_type", None)
+            produces_type = getattr(tool, "produces_type", None)
+        if not tool_id:
+            return None
+        return {
+            "id": tool_id,
+            "consumes_type": consumes_type,
+            "produces_type": produces_type,
+        }
+
+    @staticmethod
+    def _normalized_phrase(value: str) -> str:
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+    def _deterministic_workflow_match(
+        self,
+        goal: str,
+        workflow_records: List[Dict[str, Any]],
+        tool_records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        normalized_goal = self._normalized_phrase(goal)
+        goal_tokens = set(normalized_goal.split())
+        available_tool_ids = {tool["id"] for tool in tool_records}
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "for",
+            "me",
+            "my",
+            "of",
+            "or",
+            "please",
+            "the",
+            "to",
+            "with",
+        }
+        content_tokens = goal_tokens - stopwords
+        scored: List[Tuple[int, Dict[str, Any], List[str]]] = []
+        invalid_matches: List[Tuple[Dict[str, Any], List[str]]] = []
+
+        for workflow in workflow_records:
+            missing_tools = sorted(
+                set(workflow["required_tools"]) - available_tool_ids
+            )
+            score = 0
+            matched_tags: List[str] = []
+            workflow_id_phrase = self._normalized_phrase(workflow["id"])
+            workflow_name_phrase = self._normalized_phrase(workflow["name"])
+            if workflow_id_phrase and f" {workflow_id_phrase} " in f" {normalized_goal} ":
+                score += 10
+            if workflow_name_phrase and f" {workflow_name_phrase} " in f" {normalized_goal} ":
+                score += 8
+            for tag in workflow["capability_tags"]:
+                tag_phrase = self._normalized_phrase(tag)
+                tag_tokens = set(tag_phrase.split())
+                if not tag_phrase:
+                    continue
+                if f" {tag_phrase} " in f" {normalized_goal} ":
+                    score += 5
+                    matched_tags.append(tag)
+                elif len(tag_tokens) > 1 and tag_tokens.issubset(goal_tokens):
+                    score += 3
+                    matched_tags.append(tag)
+            if score:
+                if missing_tools:
+                    invalid_matches.append((workflow, missing_tools))
+                else:
+                    scored.append((score, workflow, matched_tags))
+
+        if invalid_matches and not scored:
+            workflow, missing_tools = max(
+                invalid_matches,
+                key=lambda item: len(item[0]["capability_tags"]),
+            )
+            return {
+                "status": "NO_MATCH",
+                "workflow_id": None,
+                "confidence": 0.9,
+                "reason": "missing_required_tools",
+                "missing_tools": missing_tools,
+                "matched_capability_tags": workflow["capability_tags"],
+            }
+
+        if scored:
+            scored.sort(key=lambda item: (-item[0], item[1]["id"]))
+            top_score, top_workflow, matched_tags = scored[0]
+            if len(scored) == 1 or top_score > scored[1][0]:
+                return {
+                    "status": "MATCH",
+                    "workflow_id": top_workflow["id"],
+                    "confidence": 0.95 if top_score >= 8 else 0.9,
+                    "reason": "deterministic_contract_match",
+                    "missing_tools": [],
+                    "matched_capability_tags": matched_tags,
+                }
+            return {
+                "status": "NEEDS_CLARIFICATION",
+                "workflow_id": None,
+                "confidence": 0.4,
+                "reason": "multiple_contract_matches",
+                "missing_tools": [],
+                "matched_capability_tags": [],
+            }
+
+        if not workflow_records:
+            return {
+                "status": "NO_MATCH",
+                "workflow_id": None,
+                "confidence": 1.0,
+                "reason": "no_registered_workflows",
+                "missing_tools": [],
+                "matched_capability_tags": [],
+            }
+        if len(content_tokens) >= 3 and not goal.strip().endswith("?"):
+            return {
+                "status": "NO_MATCH",
+                "workflow_id": None,
+                "confidence": 0.8,
+                "reason": "no_contract_match",
+                "missing_tools": [],
+                "matched_capability_tags": [],
+            }
+        return {
+            "status": "NEEDS_CLARIFICATION",
+            "workflow_id": None,
+            "confidence": 0.3,
+            "reason": "insufficient_goal_detail",
+            "missing_tools": [],
+            "matched_capability_tags": [],
+        }
+
+    async def match_workflow_or_gap(
+        self,
+        goal: str,
+        workflows: Sequence[Any],
+        tools: Sequence[Any],
+        redis_client: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Match an operator goal to a registered workflow or a closed-set gap."""
+        redis_client = await self._resolve_redis(redis_client)
+        workflow_records = [
+            record
+            for workflow in workflows
+            if (record := self._workflow_match_record(workflow)) is not None
+        ]
+        tool_records = [
+            record
+            for tool in tools
+            if (record := self._tool_match_record(tool)) is not None
+        ]
+        deterministic = self._deterministic_workflow_match(
+            goal,
+            workflow_records,
+            tool_records,
+        )
+        try:
+            config = await self.load_config(redis_client)
+        except Exception:
+            deterministic["provider"] = "fallback"
+            deterministic["reason"] = "deterministic_fallback"
+            return deterministic
+        if not config.enabled:
+            deterministic["provider"] = "disabled"
+            try:
+                await self._record_telemetry(
+                    provider="disabled",
+                    latency_ms=0,
+                    gate_name="workflow_match",
+                    confidence=float(deterministic["confidence"]),
+                    failovers=0,
+                    redis_client=redis_client,
+                )
+            except Exception:
+                pass
+            return deterministic
+
+        choices = {
+            f"MATCH:{workflow['id']}": (
+                f"{workflow['name']}. {workflow['description']} "
+                f"Capabilities: "
+                f"{', '.join(workflow['capability_tags']) or 'unspecified'}. "
+                f"Required tools: {', '.join(workflow['required_tools']) or 'none'}."
+            )
+            for workflow in workflow_records
+        }
+        choices["NO_MATCH"] = (
+            "No registered workflow can satisfy the goal or its required tools are unavailable."
+        )
+        choices["NEEDS_CLARIFICATION"] = (
+            "The goal is ambiguous or lacks enough detail to choose one workflow safely."
+        )
+        try:
+            result = await self._classify_choice(
+                prompt=(
+                    "Choose whether the operator goal matches exactly one registered workflow. "
+                    "Use MATCH only when the workflow's declared capabilities and tools satisfy "
+                    "the goal. Use NO_MATCH when no workflow fits. Use NEEDS_CLARIFICATION when "
+                    "the goal is ambiguous.\n\n"
+                    f"Goal: {goal[:1600]}\n"
+                    f"Available tools: {json.dumps(tool_records, sort_keys=True)}"
+                ),
+                choices=tuple(choices),
+                criteria=choices,
+                fallback="NO_MATCH",
+                gate_name="workflow_match",
+                redis_client=redis_client,
+            )
+        except Exception:
+            deterministic["provider"] = "fallback"
+            deterministic["reason"] = "deterministic_fallback"
+            return deterministic
+        if result.get("fallback_used"):
+            deterministic["provider"] = str(result.get("provider") or "fallback")
+            deterministic["reason"] = "deterministic_fallback"
+            return deterministic
+
+        choice = str(result.get("choice") or "")
+        if choice.startswith("MATCH:"):
+            workflow_id = choice.split(":", 1)[1]
+            workflow = next(
+                (item for item in workflow_records if item["id"] == workflow_id),
+                None,
+            )
+            required_tool_ids = set(workflow["required_tools"]) if workflow else set()
+            missing_tools = sorted(
+                required_tool_ids - {tool["id"] for tool in tool_records}
+            )
+            if workflow is None or missing_tools:
+                deterministic["provider"] = str(result.get("provider") or "fallback")
+                deterministic["reason"] = "invalid_model_match"
+                return deterministic
+            return {
+                "status": "MATCH",
+                "workflow_id": workflow_id,
+                "confidence": float(result.get("confidence") or 0.0),
+                "provider": str(result.get("provider") or "fallback"),
+                "reason": "model_match",
+                "missing_tools": [],
+                "matched_capability_tags": workflow["capability_tags"],
+            }
+        if choice in WORKFLOW_MATCH_STATUSES:
+            return {
+                "status": choice,
+                "workflow_id": None,
+                "confidence": float(result.get("confidence") or 0.0),
+                "provider": str(result.get("provider") or "fallback"),
+                "reason": "model_decision",
+                "missing_tools": [],
+                "matched_capability_tags": [],
+            }
+        deterministic["provider"] = str(result.get("provider") or "fallback")
+        deterministic["reason"] = "deterministic_fallback"
+        return deterministic
 
     @staticmethod
     def _parse_choice_payload(data: Dict[str, Any]) -> Tuple[Optional[str], Optional[float]]:
@@ -722,6 +1036,7 @@ class DecisionEngine:
                 "confidence": 0.0,
                 "provider": "disabled",
                 "reason": "disabled",
+                "fallback_used": True,
             }
         failovers = 0
         result: Optional[Dict[str, Any]] = None
@@ -763,6 +1078,7 @@ class DecisionEngine:
                                     min(1.0, confidence if confidence is not None else 0.85),
                                 ),
                                 "provider": "gemini",
+                                "fallback_used": False,
                             }
                 except Exception:
                     await redis_client.setex(
@@ -818,7 +1134,8 @@ class DecisionEngine:
                     ).strip()
                     parsed = json.loads(cleaned)
                     choice = str(parsed.get("choice") or "").strip()
-                    if choice not in choices:
+                    fallback_used = choice not in choices
+                    if fallback_used:
                         choice = fallback
                     result = {
                         "choice": choice,
@@ -826,6 +1143,7 @@ class DecisionEngine:
                             0.0, min(1.0, float(parsed.get("confidence") or 0.0))
                         ),
                         "provider": f"local:{base_url}",
+                        "fallback_used": fallback_used,
                     }
                     break
                 except Exception:
@@ -876,6 +1194,7 @@ class DecisionEngine:
                                 "choice": option_map[digit.group(0)],
                                 "confidence": 0.8,
                                 "provider": f"ollama:{config.ollama_model}",
+                                "fallback_used": False,
                             }
                     else:
                         await redis_client.setex(
@@ -896,6 +1215,7 @@ class DecisionEngine:
                 "confidence": 0.0,
                 "provider": "fallback",
                 "reason": "offline",
+                "fallback_used": True,
             }
         await self._record_telemetry(
             provider=str(result.get("provider") or "fallback"),

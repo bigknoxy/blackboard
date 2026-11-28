@@ -11,10 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import yaml
 
 from app.database import get_redis
+from app.mcp_gateway import mcp_gateway
 from app.web_grounding import sanitize_and_ground_links, verify_deliverable_links
 from app.models import (
+    AgentModel,
     BlackboardEntryModel,
     HITLTicketModel,
+    MCPToolModel,
     WorkflowModel,
     WorkflowRunModel,
 )
@@ -37,6 +40,13 @@ BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
 DC_NS = "http://www.omg.org/spec/DD/20100524/DC"
 DI_NS = "http://www.omg.org/spec/DD/20100524/DI"
 BB_NS = "http://blackboard.local/schema/bpmn"
+
+WORKFLOW_CONTRACT_FIELDS = (
+    "capability_tags",
+    "required_tools",
+    "input_contract",
+    "output_contract",
+)
 
 
 class WorkflowEngine:
@@ -62,7 +72,22 @@ class WorkflowEngine:
             "description": data.get("description", ""),
             "nodes": nodes,
             "edges": edges,
+            "capability_tags": list(data.get("capability_tags") or []),
+            "required_tools": list(data.get("required_tools") or []),
+            "input_contract": dict(data.get("input_contract") or {}),
+            "output_contract": dict(data.get("output_contract") or {}),
         }
+
+    @staticmethod
+    def normalize_state_graph(source: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = {
+            "nodes": list(source.get("nodes") or []),
+            "edges": list(source.get("edges") or []),
+        }
+        for field in WORKFLOW_CONTRACT_FIELDS:
+            if field in source:
+                normalized[field] = source[field]
+        return normalized
 
     @staticmethod
     def graph_to_yaml(
@@ -78,6 +103,9 @@ class WorkflowEngine:
             "nodes": state_graph.get("nodes", []),
             "edges": state_graph.get("edges", []),
         }
+        for field in WORKFLOW_CONTRACT_FIELDS:
+            if field in state_graph:
+                payload[field] = state_graph[field]
         return yaml.safe_dump(payload, sort_keys=False)
 
     @staticmethod
@@ -87,10 +115,13 @@ class WorkflowEngine:
         nodes and no dangling terminal nodes, so WorkflowEngine always emits
         Blackboard summaries and channel-agnostic `workflow.completed` pings.
         """
-        nodes = [dict(n) for n in (state_graph.get("nodes") or [])]
-        edges = [dict(e) for e in (state_graph.get("edges") or [])]
+        normalized = WorkflowEngine.normalize_state_graph(state_graph)
+        nodes = [dict(n) for n in normalized["nodes"]]
+        edges = [dict(e) for e in normalized["edges"]]
         if not nodes:
-            return {"nodes": nodes, "edges": edges}
+            normalized["nodes"] = nodes
+            normalized["edges"] = edges
+            return normalized
 
         incoming = {n["id"]: 0 for n in nodes if "id" in n}
         outgoing = {n["id"]: 0 for n in nodes if "id" in n}
@@ -131,7 +162,9 @@ class WorkflowEngine:
                 edges.append({"id": f"flow_{nid}_{end_id}", "source": nid, "target": end_id})
                 outgoing[nid] = 1
 
-        return {"nodes": nodes, "edges": edges}
+        normalized["nodes"] = nodes
+        normalized["edges"] = edges
+        return normalized
 
     async def upsert_workflow_from_yaml(
         self,
@@ -147,9 +180,7 @@ class WorkflowEngine:
         and publish a `workflow.created` / `workflow.updated` Blackboard event.
         """
         parsed_g = self.parse_yaml_to_graph(yaml_content)
-        normalized_g = self.ensure_lifecycle_events(
-            {"nodes": parsed_g.get("nodes", []), "edges": parsed_g.get("edges", [])}
-        )
+        normalized_g = self.ensure_lifecycle_events(parsed_g)
         canonical_yaml = self.graph_to_yaml(workflow_id, name, description, normalized_g)
         bpmn_x = self.graph_to_bpmn_xml(workflow_id, name, normalized_g)
 
@@ -185,6 +216,152 @@ class WorkflowEngine:
         )
         return wf
 
+    async def preflight_check_workflow(
+        self,
+        session: AsyncSession,
+        workflow_id: str,
+        required_capabilities: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Validate a workflow's registry contracts without invoking an LLM."""
+        workflow = await session.get(WorkflowModel, workflow_id)
+        if workflow is None:
+            return {
+                "workflow_id": workflow_id,
+                "workflow_exists": False,
+                "ready": False,
+                "missing_tools": [],
+                "rbac_gaps": [],
+                "missing_agents": [],
+                "tool_chain_valid": False,
+                "missing_capabilities": list(required_capabilities or []),
+                "tool_chain": None,
+            }
+
+        state_graph = workflow.state_graph or {}
+        nodes = state_graph.get("nodes") or []
+
+        def string_list(value: Any) -> List[str]:
+            if not isinstance(value, list):
+                return []
+            return [str(item).strip() for item in value if str(item).strip()]
+
+        workflow_required_tools = string_list(state_graph.get("required_tools"))
+        node_requirements: List[Tuple[str, str, List[str]]] = []
+        required_tool_ids = set(workflow_required_tools)
+        agent_ids = set()
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if node.get("type") not in ("ServiceTask", "VerificationTask"):
+                continue
+            node_id = str(node.get("id") or "").strip()
+            agent_id = str(node.get("agent_id") or "").strip() or "<unspecified>"
+            node_tools = string_list(node.get("required_tools"))
+            required_tool_ids.update(node_tools)
+            agent_ids.add(agent_id)
+            node_requirements.append((node_id, agent_id, node_tools))
+
+        tool_ids = sorted(required_tool_ids)
+        tool_result = await session.execute(select(MCPToolModel))
+        tools = list(tool_result.scalars().all())
+        existing_tool_ids = {tool.id for tool in tools}
+        missing_tools = sorted(set(tool_ids) - existing_tool_ids)
+
+        agents = []
+        if agent_ids:
+            agent_result = await session.execute(
+                select(AgentModel).where(AgentModel.id.in_(sorted(agent_ids)))
+            )
+            agents = list(agent_result.scalars().all())
+        agents_by_id = {agent.id: agent for agent in agents}
+        missing_agents = sorted(agent_ids - set(agents_by_id))
+
+        rbac_gaps: List[Dict[str, Any]] = []
+        for node_id, agent_id, node_tools in node_requirements:
+            agent = agents_by_id.get(agent_id)
+            if agent is None:
+                continue
+            allowed_tools = set(agent.allowed_tools or [])
+            for tool_id in node_tools:
+                if tool_id not in allowed_tools:
+                    rbac_gaps.append(
+                        {
+                            "agent_id": agent_id,
+                            "node_id": node_id,
+                            "tool_id": tool_id,
+                        }
+                    )
+
+        workflow_capabilities = {
+            capability.casefold()
+            for capability in string_list(state_graph.get("capability_tags"))
+        }
+        missing_capabilities = [
+            capability
+            for capability in (required_capabilities or [])
+            if capability.strip().casefold() not in workflow_capabilities
+        ]
+
+        def contract_type(
+            contract: Dict[str, Any],
+            keys: Tuple[str, ...],
+        ) -> Optional[str]:
+            for key in keys:
+                value = contract.get(key)
+                if value:
+                    return str(value).strip()
+            return None
+
+        input_contract = state_graph.get("input_contract") or {}
+        output_contract = state_graph.get("output_contract") or {}
+        source_type = (
+            contract_type(input_contract, ("source_type", "consumes_type", "type"))
+            if isinstance(input_contract, dict)
+            else None
+        )
+        target_type = (
+            contract_type(output_contract, ("target_type", "produces_type", "type"))
+            if isinstance(output_contract, dict)
+            else None
+        )
+        tool_chain: Optional[List[str]] = None
+        if source_type and target_type:
+            catalog = [
+                {
+                    "id": tool.id,
+                    "consumes_type": tool.consumes_type,
+                    "produces_type": tool.produces_type,
+                }
+                for tool in sorted(tools, key=lambda item: item.id)
+            ]
+            tool_chain = mcp_gateway.resolve_tool_chain(
+                source_type,
+                target_type,
+                catalog,
+            )
+            tool_chain_valid = tool_chain is not None
+        else:
+            tool_chain_valid = not (source_type or target_type)
+
+        ready = (
+            not missing_tools
+            and not rbac_gaps
+            and not missing_agents
+            and not missing_capabilities
+            and tool_chain_valid
+        )
+        return {
+            "workflow_id": workflow_id,
+            "workflow_exists": True,
+            "ready": ready,
+            "missing_tools": missing_tools,
+            "rbac_gaps": rbac_gaps,
+            "missing_agents": missing_agents,
+            "tool_chain_valid": tool_chain_valid,
+            "missing_capabilities": missing_capabilities,
+            "tool_chain": tool_chain,
+        }
+
     @staticmethod
     def graph_to_bpmn_xml(
         workflow_id: str, name: str, state_graph: Dict[str, Any]
@@ -195,6 +372,18 @@ class WorkflowEngine:
         """
         nodes = state_graph.get("nodes", [])
         edges = state_graph.get("edges", [])
+        contract_attrs = ""
+        for xml_name, field in (
+            ("capabilityTags", "capability_tags"),
+            ("requiredTools", "required_tools"),
+            ("inputContract", "input_contract"),
+            ("outputContract", "output_contract"),
+        ):
+            value = state_graph.get(field)
+            if value:
+                contract_attrs += (
+                    f' bb:{xml_name}="{_xml_escape(json.dumps(value, sort_keys=True))}"'
+                )
 
         tag_map = {
             "StartEvent": "bpmn:startEvent",
@@ -216,7 +405,7 @@ class WorkflowEngine:
             f'  xmlns:bb="{BB_NS}"',
             f'  id="Definitions_{workflow_id}"',
             f'  targetNamespace="http://blackboard.local/bpmn">',
-            f'  <bpmn:process id="Process_{workflow_id}" name="{_xml_escape(name)}" isExecutable="true">',
+            f'  <bpmn:process id="Process_{workflow_id}" name="{_xml_escape(name)}" isExecutable="true"{contract_attrs}>',
         ]
 
         for node in nodes:
@@ -239,12 +428,24 @@ class WorkflowEngine:
                 if node.get("prompt_template")
                 else ""
             )
+            node_contract_attrs = ""
+            for xml_name, field in (
+                ("capabilityTags", "capability_tags"),
+                ("requiredTools", "required_tools"),
+                ("inputContract", "input_contract"),
+                ("outputContract", "output_contract"),
+            ):
+                value = node.get(field)
+                if value:
+                    node_contract_attrs += (
+                        f' bb:{xml_name}="{_xml_escape(json.dumps(value, sort_keys=True))}"'
+                    )
 
             incoming = [e["id"] for e in edges if e.get("target") == nid]
             outgoing = [e["id"] for e in edges if e.get("source") == nid]
 
             lines.append(
-                f'    <{bpmn_tag} id="{nid}" name="{nname}"{agent_attr}{entry_attr}{prompt_attr}>'
+                f'    <{bpmn_tag} id="{nid}" name="{nname}"{agent_attr}{entry_attr}{prompt_attr}{node_contract_attrs}>'
             )
             for inc in incoming:
                 lines.append(f"      <bpmn:incoming>{inc}</bpmn:incoming>")
@@ -332,6 +533,29 @@ class WorkflowEngine:
         root = DefusedET.fromstring(bpmn_xml)
         nodes: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
+        process = root.find(f"{{{BPMN_NS}}}process")
+        contracts: Dict[str, Any] = {
+            "capability_tags": [],
+            "required_tools": [],
+            "input_contract": {},
+            "output_contract": {},
+        }
+        if process is not None:
+            for xml_name, field, default in (
+                ("capabilityTags", "capability_tags", []),
+                ("requiredTools", "required_tools", []),
+                ("inputContract", "input_contract", {}),
+                ("outputContract", "output_contract", {}),
+            ):
+                raw = process.attrib.get(f"{{{BB_NS}}}{xml_name}")
+                if raw is None:
+                    continue
+                try:
+                    value = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(value, type(default)):
+                    contracts[field] = value
 
         tag_lookup = {
             f"{{{BPMN_NS}}}startEvent": "StartEvent",
@@ -368,6 +592,21 @@ class WorkflowEngine:
                     "name": nname,
                     "type": ntype,
                 }
+                for xml_name, field, default in (
+                    ("capabilityTags", "capability_tags", []),
+                    ("requiredTools", "required_tools", []),
+                    ("inputContract", "input_contract", {}),
+                    ("outputContract", "output_contract", {}),
+                ):
+                    raw = elem.attrib.get(f"{{{BB_NS}}}{xml_name}")
+                    if raw is None:
+                        continue
+                    try:
+                        value = json.loads(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(value, type(default)):
+                        node_obj[field] = value
                 if agent_id:
                     node_obj["agent_id"] = agent_id
                 if ntype == "ServiceTask":
@@ -395,7 +634,7 @@ class WorkflowEngine:
                     edge_obj["condition"] = cond_text
                 edges.append(edge_obj)
 
-        return {"nodes": nodes, "edges": edges}
+        return {"nodes": nodes, "edges": edges, **contracts}
 
     @staticmethod
     def build_bounded_context(
@@ -1368,3 +1607,15 @@ def _infer_agent_from_name(name: str) -> str:
 
 
 workflow_engine = WorkflowEngine()
+
+
+async def preflight_check_workflow(
+    session: AsyncSession,
+    workflow_id: str,
+    required_capabilities: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return await workflow_engine.preflight_check_workflow(
+        session,
+        workflow_id,
+        required_capabilities=required_capabilities,
+    )
