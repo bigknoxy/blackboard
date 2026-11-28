@@ -26,7 +26,12 @@ DATABASE_URL = os.getenv(
 LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.100:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "768"))
-
+NON_ACTIVE_MEMORY_TYPES = (
+    "quarantined_web",
+    "archived_dream",
+    "rejected_injection",
+    "index",
+)
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
@@ -99,6 +104,14 @@ class InMemoryScopedMemoryStore:
         self, agent_id: str, query_vec: List[float], top_k: int = 3
     ) -> List[Dict[str, Any]]:
         scoped = [r for r in self._records if r["agent_id"] == agent_id]
+        index_records = [
+            r for r in scoped if r["memory_type"] == "index"
+        ]
+        active_records = [
+            r
+            for r in scoped
+            if r["memory_type"] not in NON_ACTIVE_MEMORY_TYPES
+        ]
         scored = [
             {
                 "id": r["id"],
@@ -107,11 +120,26 @@ class InMemoryScopedMemoryStore:
                 "content": r["content"],
                 "similarity": _cosine_similarity(query_vec, r["embedding"]),
             }
-            for r in scoped
+            for r in active_records
         ]
         scored.sort(key=lambda item: item["similarity"], reverse=True)
-        return scored[:top_k]
-
+        index = max(
+            index_records,
+            key=lambda item: item["created_at"],
+            default=None,
+        )
+        if not index:
+            return scored[:top_k]
+        return [
+            {
+                "id": index["id"],
+                "agent_id": index["agent_id"],
+                "memory_type": "index",
+                "content": index["content"],
+                "similarity": 1.0,
+            },
+            *scored[:top_k],
+        ]
 
 async def embed_text(text_input: str) -> List[float]:
     """
@@ -159,7 +187,8 @@ def build_scoped_memory_query(
         select(WorkerAgentMemory, distance_expr.label("distance"))
         .where(
             WorkerAgentMemory.agent_id
-            == bindparam("agent_id", value=agent_id)
+            == bindparam("agent_id", value=agent_id),
+            WorkerAgentMemory.memory_type.notin_(NON_ACTIVE_MEMORY_TYPES),
         )
         .order_by(distance_expr.asc())
         .limit(top_k)
@@ -197,8 +226,28 @@ async def retrieve_top_k_memories(
         return memories
 
     async with WorkerSessionLocal() as session:
+        index_stmt = (
+            select(WorkerAgentMemory)
+            .where(
+                WorkerAgentMemory.agent_id == bindparam("agent_id", value=agent_id),
+                WorkerAgentMemory.memory_type == "index",
+            )
+            .order_by(WorkerAgentMemory.created_at.desc())
+            .limit(1)
+        )
+        index_mem = (await session.execute(index_stmt, {"agent_id": agent_id})).scalars().first()
         result = await session.execute(stmt, {"agent_id": agent_id})
         memories = []
+        if index_mem is not None:
+            memories.append(
+                {
+                    "id": str(index_mem.id),
+                    "agent_id": index_mem.agent_id,
+                    "memory_type": "index",
+                    "content": index_mem.content,
+                    "similarity": 1.0,
+                }
+            )
         for mem, dist in result.all():
             memories.append(
                 {
