@@ -35,6 +35,28 @@ REDIS_EVENTS_CHANNEL = os.getenv(
 )
 
 
+def matches_command_pattern(command: str, pattern: str) -> bool:
+    """Match a shell command against an approval glob/prefix pattern.
+
+    Supports exact matches, fnmatch globs (e.g. 'git *', 'pytest*'), and
+    trailing ' *' patterns matching the bare base command without arguments
+    (e.g. 'whoami *' matches 'whoami').
+    """
+    import fnmatch
+
+    cmd = (command or "").strip()
+    pat = (pattern or "").strip()
+    if not cmd or not pat:
+        return False
+    if fnmatch.fnmatch(cmd, pat):
+        return True
+    if pat.endswith(" *") and cmd == pat[:-2].strip():
+        return True
+    if pat.endswith("*") and cmd.startswith(pat[:-1]):
+        return True
+    return False
+
+
 class UnauthorizedToolException(PermissionError):
     """
     Raised when an agent attempts to invoke an MCP tool omitted from its
@@ -1185,10 +1207,7 @@ class MCPToolboxGateway:
                 elif pol.policy_type == "command_pattern":
                     cmd = str(req.arguments.get("command", "")).strip()
                     pattern = (pol.pattern or "").strip()
-                    if pattern and (
-                        fnmatch.fnmatch(cmd, pattern)
-                        or (pattern.endswith("*") and cmd.startswith(pattern[:-1]))
-                    ):
+                    if matches_command_pattern(cmd, pattern):
                         auto_approved = True
                         auto_approve_policy_matched = pol
                         break

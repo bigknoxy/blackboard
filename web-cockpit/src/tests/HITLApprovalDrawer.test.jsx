@@ -187,4 +187,69 @@ describe("HITLApprovalDrawer - Thumb-Accessible Drawer, Triaging & Minimized Res
       null
     );
   });
+
+  it("sends command_pattern for Always Allow Pattern (single-word & multi-word) and displays API errors", async () => {
+    const { api } = await import("../api");
+    const bashTickets = [
+      {
+        id: "ticket-whoami",
+        workflow_id: "code_review_pipeline",
+        task_id: "t-whoami",
+        agent_id: "coder",
+        gate_type: "tool_approval",
+        tool_id: "bash_executor",
+        tool_arguments: { command: "whoami" },
+        status: "PENDING",
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: "ticket-git",
+        workflow_id: "code_review_pipeline",
+        task_id: "t-git",
+        agent_id: "coder",
+        gate_type: "tool_approval",
+        tool_id: "bash_executor",
+        tool_arguments: { command: "git status" },
+        status: "PENDING",
+        created_at: new Date().toISOString(),
+      },
+    ];
+
+    render(
+      <HITLGates
+        tickets={bashTickets}
+        selectedWorkflowId="code_review_pipeline"
+      />
+    );
+
+    // 1. Single-word command 'whoami' pre-fills 'whoami' and sends 'command_pattern'
+    fireEvent.click(screen.getByTestId("hitl-approve-btn-ticket-whoami"));
+    fireEvent.click(screen.getByTestId("hitl-policy-mode-pattern"));
+    const patternInput = screen.getByTestId("hitl-pattern-input");
+    expect(patternInput.value).toBe("whoami");
+    fireEvent.click(screen.getByTestId("hitl-confirm-submit-btn"));
+
+    await waitFor(() => {
+      expect(api.decideHitlTicket).toHaveBeenCalledWith(
+        "ticket-whoami",
+        "APPROVED",
+        expect.any(String),
+        "command_pattern",
+        "whoami"
+      );
+    });
+
+    // 2. Multi-word command 'git status' pre-fills 'git *' and shows visible error alert on failure
+    api.decideHitlTicket.mockRejectedValueOnce(new Error("HTTP 422 Validation Error"));
+    fireEvent.click(screen.getByTestId("hitl-approve-btn-ticket-git"));
+    fireEvent.click(screen.getByTestId("hitl-policy-mode-pattern"));
+    const gitInput = screen.getByTestId("hitl-pattern-input");
+    expect(gitInput.value).toBe("git *");
+    fireEvent.click(screen.getByTestId("hitl-confirm-submit-btn"));
+
+    await waitFor(() => {
+      const errBanner = screen.getByTestId("hitl-decision-error");
+      expect(errBanner.textContent).toContain("HTTP 422 Validation Error");
+    });
+  });
 });

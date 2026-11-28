@@ -15,8 +15,9 @@ export default function HITLGates({
   const [expandedIds, setExpandedIds] = useState({});
   const [policies, setPolicies] = useState([]);
   const [showPolicies, setShowPolicies] = useState(false);
-  const [selectedPolicyMode, setSelectedPolicyMode] = useState("once"); // 'once' | 'tool' | 'pattern' | 'workflow_node'
+  const [selectedPolicyMode, setSelectedPolicyMode] = useState("once"); // 'once' | 'tool' | 'command_pattern' | 'workflow_node'
   const [customPattern, setCustomPattern] = useState("");
+  const [decisionError, setDecisionError] = useState("");
 
   useEffect(() => {
     loadPolicies();
@@ -96,10 +97,18 @@ export default function HITLGates({
     setExpandedIds(next);
   }
 
+  function resetConfirmationState() {
+    setConfirmState(null);
+    setSelectedPolicyMode("once");
+    setCustomPattern("");
+    setDecisionError("");
+  }
+
   async function executeConfirmedDecision(policyMode = null, patternVal = null) {
     if (!confirmState) return;
     const { ticket, decision } = confirmState;
     setBusyId(ticket.id);
+    setDecisionError("");
     const chosenPolicy =
       typeof policyMode === "string"
         ? policyMode
@@ -109,7 +118,7 @@ export default function HITLGates({
     const chosenPattern =
       typeof patternVal === "string"
         ? patternVal
-        : chosenPolicy === "pattern" || chosenPolicy === "command_pattern"
+        : chosenPolicy === "command_pattern"
         ? customPattern
         : null;
     try {
@@ -121,11 +130,12 @@ export default function HITLGates({
         chosenPolicy,
         chosenPattern
       );
-      setConfirmState(null);
-      setSelectedPolicyMode("once");
-      setCustomPattern("");
+      resetConfirmationState();
       await loadPolicies();
       if (onRefresh) await onRefresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDecisionError(`Unable to ${decision.toLowerCase()} ticket: ${message}`);
     } finally {
       setBusyId(null);
     }
@@ -742,15 +752,16 @@ export default function HITLGates({
                         type="button"
                         data-testid="hitl-policy-mode-pattern"
                         onClick={() => {
-                          setSelectedPolicyMode("pattern");
+                          setSelectedPolicyMode("command_pattern");
                           if (!customPattern) {
                             const cmd = confirmState.ticket.tool_arguments?.command || "";
-                            const first = cmd.trim().split(" ")[0] || "git";
-                            setCustomPattern(`${first} *`);
+                            const words = cmd.trim().split(/\s+/).filter(Boolean);
+                            const first = words[0] || "git";
+                            setCustomPattern(words.length === 1 ? first : `${first} *`);
                           }
                         }}
                         className={`min-h-[44px] w-full px-3 py-2 rounded-lg text-xs font-semibold text-left transition border ${
-                          selectedPolicyMode === "pattern"
+                          selectedPolicyMode === "command_pattern"
                             ? "bg-emerald-950/60 border-emerald-500 text-emerald-300"
                             : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
                         }`}
@@ -760,14 +771,14 @@ export default function HITLGates({
                           Auto-approve matching command prefix or glob (e.g. <code>git *</code>).
                         </div>
                       </button>
-                      {selectedPolicyMode === "pattern" && (
+                      {selectedPolicyMode === "command_pattern" && (
                         <input
                           type="text"
                           data-testid="hitl-pattern-input"
                           value={customPattern}
                           onChange={(e) => setCustomPattern(e.target.value)}
-                          placeholder="e.g. git * or pytest*"
-                          className="w-full bg-black/60 border border-emerald-500/50 rounded-lg px-3 py-1.5 text-xs font-mono text-emerald-300"
+                          placeholder="e.g. whoami, git * or pytest*"
+                          className="min-h-[44px] w-full bg-black/60 border border-emerald-500/50 rounded-lg px-3 py-1.5 text-xs font-mono text-emerald-300"
                         />
                       )}
                     </div>
@@ -793,10 +804,19 @@ export default function HITLGates({
                 </div>
               </div>
             )}
+            {decisionError && (
+              <div
+                role="alert"
+                data-testid="hitl-decision-error"
+                className="p-2.5 rounded-lg bg-rose-950/70 border border-rose-700 text-rose-200 text-xs font-mono"
+              >
+                {decisionError}
+              </div>
+            )}
             <div className="flex gap-2.5 pt-2">
               <button
                 type="button"
-                onClick={() => setConfirmState(null)}
+                onClick={resetConfirmationState}
                 className="min-h-[44px] min-w-[44px] flex-1 rounded-lg bg-slate-800 text-xs font-semibold text-slate-200"
               >
                 Cancel
