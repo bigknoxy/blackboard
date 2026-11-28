@@ -35,6 +35,19 @@ REDIS_EVENTS_CHANNEL = os.getenv(
 )
 
 
+def _build_sanitized_subprocess_env() -> Dict[str, str]:
+    """Return the minimal environment exposed to shell subprocesses."""
+    return {
+        "PATH": os.environ.get(
+            "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        "HOME": "/tmp",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TERM": "xterm",
+    }
+
+
 def matches_command_pattern(command: str, pattern: str) -> bool:
     """Match a shell command against an approval glob/prefix pattern.
 
@@ -586,6 +599,7 @@ class MCPToolboxGateway:
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_build_sanitized_subprocess_env(),
                 start_new_session=True,
             )
             try:
@@ -1317,6 +1331,7 @@ class MCPToolboxGateway:
                         cmd,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
+                        env=_build_sanitized_subprocess_env(),
                         start_new_session=True,
                     )
                     try:
