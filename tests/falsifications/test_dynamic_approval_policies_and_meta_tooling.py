@@ -362,3 +362,165 @@ async def test_falsifier_16_concierge_dynamic_tool_synthesis_and_policy(db_sessi
         assert policy is not None
         assert policy.policy_type == "tool"
         assert policy.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_hitl_decide_always_allow_pattern_and_global_tool_dedup_retroactive(db_session):
+    """
+    Verifies:
+    1. POST /api/v1/blackboard/hitl/{id}/decide with auto_approve_policy='command_pattern'
+       works for single-word commands ('whoami' AND 'whoami *') and auto-approves subsequent calls.
+    2. auto_approve_policy='tool' creates a global (agent_id=None), deduplicated policy that
+       auto-approves subsequent calls from DIFFERENT authorized agents AND retroactively resolves
+       other already-PENDING tickets for the same tool.
+    """
+    app.dependency_overrides[get_db] = lambda: db_session
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # Ensure coder and architect both have bash_executor in allowed_tools
+        for ag_id in ("coder", "architect"):
+            ag = await db_session.get(AgentModel, ag_id)
+            if ag and "bash_executor" not in (ag.allowed_tools or []):
+                ag.allowed_tools = list(ag.allowed_tools or []) + ["bash_executor"]
+        # Clean up any leftover bash_executor policies & pending tickets
+        await db_session.execute(
+            delete(ApprovalPolicyModel).where(
+                ApprovalPolicyModel.tool_id == "bash_executor"
+            )
+        )
+        await db_session.execute(
+            delete(HITLTicketModel).where(
+                HITLTicketModel.tool_id == "bash_executor",
+                HITLTicketModel.status == "PENDING",
+            )
+        )
+        await db_session.commit()
+
+        # 1. Queue a 'whoami' ticket and approve with command_pattern='whoami *' (legacy trailing-space glob)
+        inv1 = await client.post(
+            "/api/v1/tools/invoke",
+            json={
+                "agent_id": "coder",
+                "workflow_id": "code_review_pipeline",
+                "task_id": "task-whoami-1",
+                "tool_id": "bash_executor",
+                "arguments": {"command": "whoami"},
+            },
+        )
+        assert inv1.status_code == 200
+        assert inv1.json()["status"] == "AWAITING_APPROVAL"
+        ticket1_id = inv1.json()["hitl_ticket_id"]
+
+        dec1 = await client.post(
+            f"/api/v1/blackboard/hitl/{ticket1_id}/decide",
+            json={
+                "decision": "APPROVED",
+                "reviewer_comment": "Allow whoami pattern",
+                "auto_approve_policy": "command_pattern",
+                "pattern": "whoami *",
+            },
+        )
+        assert dec1.status_code == 200
+        assert dec1.json()["status"] == "APPROVED"
+
+        # Subsequent 'whoami' call MUST auto-execute (not stall in AWAITING_APPROVAL)
+        inv2 = await client.post(
+            "/api/v1/tools/invoke",
+            json={
+                "agent_id": "coder",
+                "workflow_id": "code_review_pipeline",
+                "task_id": "task-whoami-2",
+                "tool_id": "bash_executor",
+                "arguments": {"command": "whoami"},
+            },
+        )
+        assert inv2.status_code == 200
+        assert inv2.json()["status"] == "EXECUTED"
+
+        # Clean up command_pattern policy before testing global tool policy
+        await db_session.execute(
+            delete(ApprovalPolicyModel).where(
+                ApprovalPolicyModel.tool_id == "bash_executor"
+            )
+        )
+        await db_session.commit()
+
+        # 2. Queue TWO pending bash_executor tickets (one from coder, one from architect)
+        q1 = await client.post(
+            "/api/v1/tools/invoke",
+            json={
+                "agent_id": "coder",
+                "workflow_id": "code_review_pipeline",
+                "task_id": "task-tool-1",
+                "tool_id": "bash_executor",
+                "arguments": {"command": "echo first"},
+            },
+        )
+        q2 = await client.post(
+            "/api/v1/tools/invoke",
+            json={
+                "agent_id": "architect",
+                "workflow_id": "code_review_pipeline",
+                "task_id": "task-tool-2",
+                "tool_id": "bash_executor",
+                "arguments": {"command": "echo second"},
+            },
+        )
+        assert q1.json()["status"] == "AWAITING_APPROVAL"
+        assert q2.json()["status"] == "AWAITING_APPROVAL"
+        t1_id = q1.json()["hitl_ticket_id"]
+        t2_id = q2.json()["hitl_ticket_id"]
+
+        # Approve ticket 1 with auto_approve_policy='tool' -> creates global policy (agent_id=None)
+        # AND retroactively auto-approves ticket 2!
+        dec_tool = await client.post(
+            f"/api/v1/blackboard/hitl/{t1_id}/decide",
+            json={
+                "decision": "APPROVED",
+                "reviewer_comment": "Always allow bash_executor",
+                "auto_approve_policy": "tool",
+            },
+        )
+        assert dec_tool.status_code == 200
+
+        # Verify global policy (agent_id is None) and no duplicates
+        pols = (
+            await db_session.execute(
+                select(ApprovalPolicyModel).where(
+                    ApprovalPolicyModel.tool_id == "bash_executor",
+                    ApprovalPolicyModel.policy_type == "tool",
+                )
+            )
+        ).scalars().all()
+        assert len(pols) == 1
+        assert pols[0].agent_id is None
+
+        # Verify ticket 2 was retroactively auto-approved!
+        await db_session.refresh(await db_session.get(HITLTicketModel, t2_id))
+        t2_obj = await db_session.get(HITLTicketModel, t2_id)
+        assert t2_obj.status == "APPROVED"
+
+        # Verify a DIFFERENT authorized agent (architect) now auto-executes bash_executor
+        inv3 = await client.post(
+            "/api/v1/tools/invoke",
+            json={
+                "agent_id": "architect",
+                "workflow_id": "code_review_pipeline",
+                "task_id": "task-tool-3",
+                "tool_id": "bash_executor",
+                "arguments": {"command": "echo third"},
+            },
+        )
+        assert inv3.status_code == 200
+        assert inv3.json()["status"] == "EXECUTED"
+
+        # Clean up
+        await db_session.execute(
+            delete(ApprovalPolicyModel).where(
+                ApprovalPolicyModel.tool_id == "bash_executor"
+            )
+        )
+        await db_session.commit()
+    app.dependency_overrides.clear()

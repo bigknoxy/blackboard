@@ -1450,25 +1450,99 @@ async def decide_hitl_ticket(
 
     # Automatically create permanent approval policy if requested (Invariant 16)
     if payload.decision == "APPROVED" and payload.auto_approve_policy:
-        pol_type = payload.auto_approve_policy
-        p_pattern = payload.pattern
-        if pol_type == "command_pattern" and not p_pattern and ticket.tool_id == "bash_executor":
-            cmd = str(ticket.tool_arguments.get("command", "")).strip()
-            first_word = cmd.split()[0] if cmd else "cmd"
-            p_pattern = f"{first_word} *"
+        from app.mcp_gateway import matches_command_pattern
 
-        auto_pol = ApprovalPolicyModel(
-            policy_type=pol_type,
-            tool_id=ticket.tool_id if pol_type in ("tool", "command_pattern") else None,
-            agent_id=ticket.agent_id if pol_type == "tool" else None,
-            workflow_id=ticket.workflow_id if pol_type == "workflow_node" else None,
-            node_id=ticket.tool_id if pol_type == "workflow_node" else None,
-            pattern=p_pattern,
-            enabled=True,
-            created_by="operator",
+        pol_type = payload.auto_approve_policy
+        p_pattern = (payload.pattern or "").strip() or None
+        if pol_type == "command_pattern" and not p_pattern and ticket.tool_id == "bash_executor":
+            cmd = str((ticket.tool_arguments or {}).get("command", "")).strip()
+            words = cmd.split()
+            if len(words) == 1:
+                p_pattern = words[0]
+            elif len(words) > 1:
+                p_pattern = f"{words[0]} *"
+            else:
+                p_pattern = "cmd *"
+
+        pol_tool_id = ticket.tool_id if pol_type in ("tool", "command_pattern") else None
+        # "Always Allow Tool" applies globally across authorized agents (RBAC Invariant 4 still enforced)
+        pol_agent_id = None
+        pol_workflow_id = ticket.workflow_id if pol_type == "workflow_node" else None
+        pol_node_id = ticket.tool_id if pol_type == "workflow_node" else None
+
+        existing_stmt = select(ApprovalPolicyModel).where(
+            ApprovalPolicyModel.enabled == True,
+            ApprovalPolicyModel.policy_type == pol_type,
+            ApprovalPolicyModel.tool_id == pol_tool_id,
+            ApprovalPolicyModel.agent_id == pol_agent_id,
+            ApprovalPolicyModel.workflow_id == pol_workflow_id,
+            ApprovalPolicyModel.node_id == pol_node_id,
+            ApprovalPolicyModel.pattern == p_pattern,
         )
-        session.add(auto_pol)
-        await session.commit()
+        existing_pol = (await session.execute(existing_stmt)).scalars().first()
+        if existing_pol is not None:
+            auto_pol = existing_pol
+        else:
+            auto_pol = ApprovalPolicyModel(
+                policy_type=pol_type,
+                tool_id=pol_tool_id,
+                agent_id=pol_agent_id,
+                workflow_id=pol_workflow_id,
+                node_id=pol_node_id,
+                pattern=p_pattern,
+                enabled=True,
+                created_by="operator",
+            )
+            session.add(auto_pol)
+            await session.commit()
+            await session.refresh(auto_pol)
+
+        # Retroactively auto-approve any other queued PENDING tickets matching this new policy
+        if pol_type in ("tool", "command_pattern") and pol_tool_id:
+            pending_stmt = select(HITLTicketModel).where(
+                HITLTicketModel.status == "PENDING",
+                HITLTicketModel.id != ticket.id,
+                HITLTicketModel.tool_id == pol_tool_id,
+            )
+            other_pending = (await session.execute(pending_stmt)).scalars().all()
+            for other in other_pending:
+                if pol_type == "command_pattern":
+                    other_cmd = str((other.tool_arguments or {}).get("command", "")).strip()
+                    if not matches_command_pattern(other_cmd, p_pattern or ""):
+                        continue
+                other.status = "APPROVED"
+                other.reviewer_comment = (
+                    f"Auto-approved by newly created {pol_type} policy ({auto_pol.id})"
+                )
+                other.resolved_at = datetime.now(timezone.utc)
+                other_result = None
+                if other.tool_id and other.gate_type != "user_task":
+                    exec_resp = await mcp_gateway.invoke_tool(
+                        session,
+                        ToolInvokeRequest(
+                            agent_id=other.agent_id,
+                            tool_id=other.tool_id,
+                            arguments=other.tool_arguments or {},
+                            workflow_id=other.workflow_id,
+                            task_id=other.task_id,
+                            bypass_approval=True,
+                        ),
+                    )
+                    other_result = exec_resp.model_dump(mode="json")
+                    other.execution_result = other_result
+                await session.commit()
+                await workflow_engine._publish_event(
+                    {
+                        "event": "hitl.ticket_resolved",
+                        "ticket_id": str(other.id),
+                        "workflow_id": other.workflow_id,
+                        "task_id": other.task_id,
+                        "agent_id": other.agent_id,
+                        "decision": other.status,
+                        "reviewer_comment": other.reviewer_comment,
+                        "tool_result": other_result,
+                    }
+                )
 
     await workflow_engine._publish_event(
         {
