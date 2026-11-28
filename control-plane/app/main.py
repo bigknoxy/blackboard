@@ -23,6 +23,10 @@ from sqlalchemy import delete, desc, func, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.concierge import compute_embedding, concierge_agent
+from app.concierge_legacy_rules import (
+    LEGACY_RULES_REDIS_KEY,
+    legacy_rules_enabled_from_value,
+)
 from app.database import AsyncSessionLocal, get_db, get_redis, init_db
 from app.decision_engine import decision_engine
 from app.graph import BlackboardGraphEngine, GraphCycleException
@@ -1750,6 +1754,8 @@ async def get_llm_router_status() -> Dict[str, Any]:
         pass
 
     r_dec_en = await redis_client.get("llm:decision:enabled")
+    r_legacy_rules = await redis_client.get(LEGACY_RULES_REDIS_KEY)
+    legacy_rules_enabled = legacy_rules_enabled_from_value(r_legacy_rules)
     env_dec_en = os.getenv("DECISION_MODEL_ENABLED", "true").lower() not in ("false", "0", "no")
     decision_enabled = (
         env_dec_en
@@ -1800,6 +1806,7 @@ async def get_llm_router_status() -> Dict[str, Any]:
         "prefer_local": prefer_local,
         "decision_model": {
             "enabled": decision_enabled,
+            "legacy_rules_enabled": legacy_rules_enabled,
             "provider": decision_provider,
             "gemini_api_key_configured": bool(effective_gem_key),
             "gemini_model": gemini_model,
@@ -1900,6 +1907,11 @@ async def update_llm_router_config(
         await redis_client.set(
             "llm:decision:enabled",
             "true" if payload.decision_model_enabled else "false",
+        )
+    if payload.legacy_rules_enabled is not None:
+        await redis_client.set(
+            LEGACY_RULES_REDIS_KEY,
+            "true" if payload.legacy_rules_enabled else "false",
         )
     if payload.decision_model_provider is not None:
         prov = payload.decision_model_provider.strip().lower()

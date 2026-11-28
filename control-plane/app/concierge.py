@@ -44,6 +44,11 @@ from app.schemas import ConciergeChatRequest, ConciergeChatResponse, ToolInvokeR
 from app.workflow_engine import workflow_engine
 from app.database import get_redis
 from app.decision_engine import decision_engine
+from app.concierge_legacy_rules import (
+    classify_legacy_rules,
+    legacy_rules_enabled_from_value,
+    load_legacy_rules_enabled,
+)
 logger = logging.getLogger("blackboard.concierge")
 
 LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://192.168.1.150:11434")
@@ -71,6 +76,15 @@ CLASSIFIER_CONFIDENCE_LOW = float(os.getenv("CLASSIFIER_CONFIDENCE_LOW", "0.45")
 DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "qwen2.5-coder:0.5b")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "768"))
+
+
+async def _is_legacy_rules_enabled() -> bool:
+    """Resolve the runtime legacy-rules gate, falling back to the environment."""
+    try:
+        return await load_legacy_rules_enabled(get_redis())
+    except Exception as exc:
+        logger.warning("Failed to read legacy Concierge rules setting: %s", exc)
+        return legacy_rules_enabled_from_value()
 
 
 def evaluate_memory_worthiness(text: str) -> bool:
@@ -365,10 +379,35 @@ class ConciergeAdminAgent:
             c_agent.allowed_tools = list(c_agent.allowed_tools or []) + ["weather_lookup"]
             await session.commit()
 
+        rules = classify_legacy_rules(msg)
+        decision: Optional[Dict[str, Any]] = None
+        if not rules.has_explicit_operator_command and len(msg) > 2:
+            workflow_rows = (await session.execute(select(WorkflowModel))).scalars().all()
+            available_workflows = [
+                {
+                    "id": workflow.id,
+                    "name": workflow.name,
+                    "description": workflow.description,
+                }
+                for workflow in workflow_rows
+            ]
+            try:
+                decision = await self._classify_intent(msg, available_workflows)
+            except Exception as exc:
+                logger.warning("DecisionEngine routing failed; using legacy fallback: %s", exc)
+
+        decision_confidence = float((decision or {}).get("confidence", 0.0))
+        semantic_routing_active = (
+            decision is not None
+            and decision.get("provider") != "disabled"
+            and decision_confidence >= CLASSIFIER_CONFIDENCE_HIGH
+        )
+        legacy_rules_enabled = await _is_legacy_rules_enabled()
+        legacy_routing_active = legacy_rules_enabled and not semantic_routing_active
+
         # 1. Execute administrative meta-tools triggered by intent or explicit command
-        if any(
-            k in lowered
-            for k in ["steer:", "steer ", "instruct ", "override "]
+        if rules.explicit_steering or (
+            legacy_routing_active and rules.legacy_steering
         ):
             wf_id = req.workflow_id or "code_review_pipeline"
             steering_entry = BlackboardEntryModel(
@@ -401,18 +440,9 @@ class ConciergeAdminAgent:
                 }
             )
 
-        explicit_wf_match = re.search(
-            r"\b(?:run|start|trigger|execute)\s+([a-z0-9_-]+_(?:pipeline|workflow))\b",
-            lowered,
-        )
-        if explicit_wf_match or any(
-            k in lowered
-            for k in ["run workflow", "start workflow", "trigger pipeline"]
-        ):
-            wf_id = (
-                explicit_wf_match.group(1)
-                if explicit_wf_match
-                else (req.workflow_id or "code_review_pipeline")
+        if rules.explicit_workflow_id or rules.explicit_workflow_trigger:
+            wf_id = rules.explicit_workflow_id or (
+                req.workflow_id or "code_review_pipeline"
             )
             wf = await session.get(WorkflowModel, wf_id)
             if wf:
@@ -428,11 +458,8 @@ class ConciergeAdminAgent:
                         "status": run.status,
                     }
                 )
-        elif (
-            any(k in lowered for k in ["do planning and research", "plan and research", "planning and research", "research and add"])
-            and not any(q in lowered for q in ["did you", "have you", "what research", "status"])
-        ):
-            wf_id = "research_plan_verify_pipeline"
+        elif legacy_routing_active and rules.legacy_workflow_id:
+            wf_id = rules.legacy_workflow_id
             wf = await session.get(WorkflowModel, wf_id)
             if not wf:
                 wf_id = req.workflow_id or "code_review_pipeline"
@@ -451,9 +478,7 @@ class ConciergeAdminAgent:
                     }
                 )
 
-        if any(
-            k in lowered for k in ["prune", "summarize blackboard", "condense"]
-        ):
+        if rules.explicit_prune:
             wf_id = req.workflow_id or "code_review_pipeline"
             summary = await workflow_engine.prune_and_summarize_blackboard(
                 session, wf_id, threshold=2, keep_recent=1
@@ -468,15 +493,7 @@ class ConciergeAdminAgent:
             )
 
         # Meta-Workflow Trigger: create or update workflow / architect workflow intent with verification
-        if any(
-            k in lowered for k in [
-                "create workflow", "new workflow", "build workflow", "add workflow",
-                "create a workflow", "architect workflow", "design workflow",
-                "update workflow", "modify workflow", "change workflow",
-                "add step to workflow", "add node to workflow", "update the workflow",
-                "create agent", "new agent"
-            ]
-        ):
+        if rules.explicit_workflow_architect:
             # Check if this is an update to an existing workflow
             is_update = any(k in lowered for k in ["update", "modify", "change", "add step", "add node"])
             target_wf_id = req.workflow_id or "code_review_pipeline"
@@ -543,13 +560,7 @@ class ConciergeAdminAgent:
                 )
 
         # Backlog & Idea Capture
-        if any(
-            k in lowered for k in [
-                "capture this as a future feature", "table this for now",
-                "capture this", "add to backlog", "save idea", "log idea",
-                "capture idea", "future feature", "table this", "add idea", "new idea"
-            ]
-        ):
+        if rules.explicit_capture_idea:
             clean_title = msg
             for prefix in [
                 "capture this as a future feature", "table this for now but",
@@ -601,13 +612,7 @@ class ConciergeAdminAgent:
             )
 
         # List Backlog Intent
-        if any(
-            k in lowered for k in [
-                "show backlog", "list backlog", "what ideas", "view ideas",
-                "show ideas", "backlog items", "what is on the backlog",
-                "check backlog", "check the backlog", "did you add"
-            ]
-        ):
+        if rules.explicit_list_backlog:
             b_res = await session.execute(
                 select(BacklogItemModel).order_by(BacklogItemModel.created_at.desc()).limit(10)
             )
@@ -629,15 +634,8 @@ class ConciergeAdminAgent:
             )
 
         # Tool Management, Auto-Provisioning & Proactive Suggestion Intent
-        if any(
-            k in lowered for k in [
-                "add tool", "add tools", "web search", "web_search",
-                "register tool", "add web_search",
-                "need a tool", "need tools", "suggest tool", "suggest tools",
-                "what tools do you suggest", "what tools should we have",
-                "bash tool", "web tool", "add bash", "need a bash", "need bash",
-                "should we have recognized this"
-            ]
+        if rules.explicit_tool_registration or (
+            legacy_routing_active and rules.legacy_tool_management
         ):
             from app.mcp_gateway import mcp_gateway
 
@@ -700,31 +698,14 @@ class ConciergeAdminAgent:
                 })
 
         # Capabilities & Help Intent ("What all can you do", "What can you do", "capabilities")
-        if any(
-            k in lowered for k in [
-                "what all can you do", "what can you do", "what are your capabilities",
-                "what all do you do", "what do you do", "how can you help",
-                "what are you capable of", "list capabilities", "show capabilities", "help"
-            ]
-        ):
+        if legacy_routing_active and rules.legacy_capabilities:
             tool_calls_executed.append({
                 "tool": "describe_capabilities",
                 "status": "COMPLETED",
             })
 
         # Architect Tool Gap Analysis Intent (Comprehensive Best-Practice Tooling Audit)
-        if (
-            any(
-                k in lowered for k in [
-                    "tools we are missing", "tools are missing", "missing tools",
-                    "what tools are we missing", "tool gap", "analyze tool inventory",
-                    "architect agent to figure out what tools", "architect to figure out what tools",
-                    "architect figure out what tools", "architect to analyze tools",
-                    "architect analyze tools", "what tools would benefit us"
-                ]
-            )
-            or ("architect" in lowered and "tools" in lowered and ("missing" in lowered or "gap" in lowered or "benefit" in lowered or "usage" in lowered))
-        ):
+        if legacy_routing_active and rules.legacy_tool_gap:
             tools_res = await session.execute(select(MCPToolModel))
             existing_tools = tools_res.scalars().all()
             existing_tool_ids = {t.id for t in existing_tools}
@@ -821,14 +802,7 @@ class ConciergeAdminAgent:
             })
 
         # Autonomous Dynamic Tool & Skill Synthesis Intent (Invariant 16)
-        if any(
-            k in lowered for k in [
-                "create a new tool", "create new tool", "create tool", "add tool",
-                "synthesize a new tool", "synthesize new tool", "synthesize tool",
-                "build tool", "make a tool", "make tool", "update tool", "modify tool",
-                "create skill", "add skill", "new skill", "synthesize skill", "build skill", "create a skill"
-            ]
-        ):
+        if rules.explicit_dynamic_tool:
             name_match = re.search(r"(?:named|called)\s+['\"]?([a-zA-Z0-9_\-]+)['\"]?", msg, re.IGNORECASE)
             if not name_match:
                 name_match = re.search(r"(?:tool|skill)\s+['\"]([a-zA-Z0-9_\-]+)['\"]", msg, re.IGNORECASE)
@@ -888,14 +862,7 @@ class ConciergeAdminAgent:
             })
 
         # Dynamic Approval Policy Management Intent (Invariant 16)
-        if any(
-            k in lowered for k in [
-                "permanently approve", "permanently trust", "always allow",
-                "always approve", "auto approve", "auto-approve",
-                "trust tool", "trust step", "automate step", "automate workflow",
-                "approval policies", "show policies", "list policies", "revoke policy"
-            ]
-        ):
+        if rules.explicit_approval_policy:
             if any(k in lowered for k in ["show", "list", "view"]):
                 stmt = select(ApprovalPolicyModel).order_by(ApprovalPolicyModel.created_at.desc())
                 res = await session.execute(stmt)
@@ -973,11 +940,9 @@ class ConciergeAdminAgent:
                 })
 
         # Autonomous Weather Lookup Intent
-        if any(
-            k in lowered for k in [
-                "weather", "forecast", "temperature", "how cold", "how hot", "how warm"
-            ]
-        ) and not any(k in lowered for k in ["add tool", "register tool", "create tool"]):
+        if legacy_routing_active and rules.legacy_weather and not any(
+            k in lowered for k in ["add tool", "register tool", "create tool"]
+        ):
             from app.mcp_gateway import mcp_gateway
 
             wl_tool = await session.get(MCPToolModel, "weather_lookup")
@@ -1014,14 +979,9 @@ class ConciergeAdminAgent:
                 })
 
         # Autonomous Web Search Execution Intent
-        if any(
-            k in lowered for k in [
-                "search the web", "search web", "web search", "search online",
-                "search for", "google", "lookup online", "nfl", "football",
-                "games today", "game today", "scores today", "weather today",
-                "news today"
-            ]
-        ) and not any(k in lowered for k in ["add tool", "register tool", "create tool"]):
+        if legacy_routing_active and rules.legacy_web_search and not any(
+            k in lowered for k in ["add tool", "register tool", "create tool"]
+        ):
             from app.mcp_gateway import mcp_gateway
 
             # Ensure web_search is in DB
@@ -1099,20 +1059,8 @@ class ConciergeAdminAgent:
                     })
 
         # Store Memory & Operator Preference Intent (never trigger on interrogative recall questions)
-        is_recall_question = any(
-            k in lowered for k in [
-                "what do you remember", "do you remember", "can you remember",
-                "tell me what you remember", "what did i ask you to remember",
-            ]
-        )
-        is_remember_intent = (
-            not is_recall_question
-            and any(
-                k in lowered for k in [
-                    "remember", "save to memory", "store in memory", "keep in mind", "note that"
-                ]
-            )
-        )
+        is_recall_question = rules.recall_question
+        is_remember_intent = rules.explicit_remember
         if is_remember_intent:
             fact_text = msg
             for prefix in [
@@ -1175,16 +1123,7 @@ class ConciergeAdminAgent:
                     "status": "STORED",
                 })
         # List & Inspect Stored Memories Intent
-        if any(
-            k in lowered for k in [
-                "what do your other memories include", "what memories", "list memories",
-                "show memories", "search memory", "what is in memory", "what do you remember",
-                "other memories", "inspect memories", "view memories",
-                "did you conduct", "what research", "research results", "any research",
-                "check memory", "check memories", "stored memories",
-                "what did you find", "what did the researcher", "retrieve the stored memories"
-            ]
-        ) and not is_remember_intent:
+        if legacy_routing_active and rules.legacy_list_memories and not is_remember_intent:
             all_mems_res = await session.execute(
                 select(AgentMemoryModel).order_by(AgentMemoryModel.created_at.desc()).limit(25)
             )
@@ -1202,7 +1141,7 @@ class ConciergeAdminAgent:
             })
 
         # Direct Bash Execution intent
-        if any(lowered.startswith(p) for p in ["bash:", "run bash:", "run command:", "exec:"]):
+        if rules.explicit_bash:
             cmd = msg.split(":", 1)[1].strip()
             from app.mcp_gateway import mcp_gateway
 
@@ -1256,11 +1195,12 @@ class ConciergeAdminAgent:
             }
         )
 
-        # Stage 2: Lightweight Structured Intent Classifier (Archon orchestrator pattern)
-        if len(tool_calls_executed) == 1 and len(msg.strip()) > 8:
+        # Stage 2: Apply the shared semantic router when it owns the decision.
+        if len(tool_calls_executed) == 1:
             available_wf_objs = state_snapshot.get("workflows", [])
             available_wfs = [w["id"] for w in available_wf_objs]
-            decision = await self._classify_intent(msg, available_wf_objs)
+            if decision is None:
+                decision = await self._classify_intent(msg, available_wf_objs)
             d_intent = decision.get("intent", "chat")
             d_conf = float(decision.get("confidence", 0.0))
             if d_intent == "trigger_workflow":

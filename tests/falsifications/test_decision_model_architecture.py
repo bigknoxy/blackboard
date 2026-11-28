@@ -453,5 +453,74 @@ async def test_e2e_api_config_toggle_and_telemetry_status(db_session, fake_redis
                 assert dm["ollama_classifier_model"] == "qwen3.5:0.8b"
                 assert "telemetry" in dm
                 assert "calls" in dm["telemetry"]
+                assert dm["legacy_rules_enabled"] is True
+
+                # Issue #22: Toggle legacy_rules_enabled OFF at runtime without restart
+                off_resp = await client.post(
+                    "/api/v1/llm/config",
+                    json={"legacy_rules_enabled": False},
+                )
+                assert off_resp.status_code == 200
+                st_off = (await client.get("/api/v1/llm/status")).json()["decision_model"]
+                assert st_off["legacy_rules_enabled"] is False
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_issue_22_deletable_legacy_rules_semantic_first_and_explicit_commands(db_session, fake_redis):
+    """
+    Issue #22:
+    1. When DecisionEngine is ON and legacy_rules_enabled=False, Concierge routes via DecisionEngine
+       without legacy keyword heuristics hijacking normal conversation.
+    2. Explicit deterministic commands (steer:, remember X) still work when legacy_rules_enabled=False.
+    3. When DecisionEngine is OFF and legacy_rules_enabled=True, legacy fallback catches workflow intents.
+    """
+    await _ensure_agents_and_workflows(db_session)
+    from app.concierge_legacy_rules import LEGACY_RULES_REDIS_KEY
+
+    # Case 1: Legacy rules OFF + DecisionEngine returns chat -> no false-positive workflow trigger
+    await fake_redis.set(LEGACY_RULES_REDIS_KEY, "false")
+    with (
+        patch("app.concierge.get_redis", return_value=fake_redis),
+        patch.object(concierge_agent, "_try_ollama_chat_with_tools", AsyncMock(return_value=("Just chatting.", []))),
+        patch.object(
+            concierge_agent,
+            "_classify_intent",
+            AsyncMock(return_value={"intent": "chat", "workflow_id": None, "confidence": 0.94, "provider": "gemini"}),
+        ),
+    ):
+        resp_chat = await concierge_agent.handle_chat(
+            db_session,
+            ConciergeChatRequest(message="Explain how code review pipelines work in general"),
+        )
+    assert not any(tc.get("tool") == "trigger_workflow" for tc in resp_chat.tool_calls_executed)
+
+    # Case 2: Explicit remember command stays deterministic even when legacy_rules_enabled=False (Invariant 15)
+    with (
+        patch("app.concierge.get_redis", return_value=fake_redis),
+        patch("app.concierge.compute_embedding", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(concierge_agent, "_try_ollama_chat_with_tools", AsyncMock(return_value=("Remembered.", []))),
+    ):
+        resp_rem = await concierge_agent.handle_chat(
+            db_session,
+            ConciergeChatRequest(message="Remember that my preferred linter is ruff."),
+        )
+    assert any(
+        tc.get("tool") == "store_memory" and tc.get("status") == "STORED"
+        for tc in resp_rem.tool_calls_executed
+    )
+
+    # Case 3: Legacy rules ON + DecisionEngine OFF -> legacy fallback still routes workflow intents
+    await fake_redis.set(LEGACY_RULES_REDIS_KEY, "true")
+    await fake_redis.set("llm:decision:enabled", "false")
+    with (
+        patch("app.concierge.get_redis", return_value=fake_redis),
+        patch("app.decision_engine.get_redis", return_value=fake_redis),
+        patch.object(concierge_agent, "_try_ollama_chat_with_tools", AsyncMock(return_value=(None, []))),
+    ):
+        resp_fb = await concierge_agent.handle_chat(
+            db_session,
+            ConciergeChatRequest(message="Please run the code_review_pipeline on auth.py"),
+        )
+    assert any(tc.get("tool") == "trigger_workflow" for tc in resp_fb.tool_calls_executed)

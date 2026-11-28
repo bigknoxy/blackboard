@@ -381,6 +381,7 @@ class LLMRouterConfigRequest(BaseModel):
     prefer_local: Optional[bool] = None
     clear_cooldowns: bool = False
     decision_model_enabled: Optional[bool] = None
+    legacy_rules_enabled: Optional[bool] = None
     decision_model_provider: Optional[str] = None
     gemini_api_key: Optional[str] = None
     gemini_decision_model: Optional[str] = None
