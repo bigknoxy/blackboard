@@ -385,6 +385,21 @@ async def seed_initial_state() -> None:
                         )
                     )
                     await session.flush()
+                else:
+                    existing_sg = dict(existing_wf.state_graph or {})
+                    normalized_parsed = workflow_engine.normalize_state_graph(parsed)
+                    updated_contracts = False
+                    for field in WORKFLOW_CONTRACT_FIELDS:
+                        if not existing_sg.get(field) and normalized_parsed.get(field):
+                            existing_sg[field] = normalized_parsed[field]
+                            updated_contracts = True
+                    if updated_contracts:
+                        existing_wf.state_graph = existing_sg
+                        existing_wf.yaml_source = raw_yaml
+                        existing_wf.bpmn_xml = workflow_engine.graph_to_bpmn_xml(
+                            wf_id, existing_wf.name, existing_sg
+                        )
+                        await session.flush()
             except Exception as exc:
                 logger.warning(
                     "Failed loading workflow file %s: %s", yaml_path, exc

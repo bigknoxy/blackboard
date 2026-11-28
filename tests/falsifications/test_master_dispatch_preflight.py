@@ -151,6 +151,7 @@ async def test_backfilled_workflows_are_preflight_ready_with_registered_agents(d
             "repo_search",
             "ast_complexity_analyzer",
             "workflow_architect_validator",
+            "workflow_activator",
         },
         "researcher": {"web_search", "repo_search"},
         "coder": {"repo_search", "ast_complexity_analyzer"},
