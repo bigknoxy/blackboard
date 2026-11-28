@@ -1084,7 +1084,7 @@ class ConciergeAdminAgent:
                     emb = await compute_embedding(crystal_content)
                     c_mem = AgentMemoryModel(
                         agent_id="researcher",
-                        memory_type="semantic",
+                        memory_type="quarantined_web",
                         content=crystal_content,
                         embedding=emb,
                     )
@@ -1093,6 +1093,7 @@ class ConciergeAdminAgent:
                     tool_calls_executed.append({
                         "tool": "store_memory",
                         "agent_id": "researcher",
+                        "memory_type": "quarantined_web",
                         "content": crystal_content[:100],
                         "status": "CRYSTALLIZED",
                     })

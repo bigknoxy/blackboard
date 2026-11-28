@@ -2388,6 +2388,111 @@ async def list_optimization_runs(
     return list(res.scalars().all())
 
 
+# ==============================================================================
+# 10. OFFLINE MEMORY DREAMING & QUARANTINE API (Issues #20 & #21)
+# ==============================================================================
+@app.post("/api/v1/memory/dream")
+async def run_memory_dream_pass(
+    request: Request,
+    agent_id: Optional[str] = Query(default=None),
+    dry_run: bool = Query(default=False),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Trigger an offline copy-on-write Memory Dreaming consolidation pass."""
+    from app.dreaming import memory_dreaming_worker
+
+    body: Dict[str, Any] = {}
+    try:
+        raw_body = await request.body()
+        if raw_body:
+            body = json.loads(raw_body)
+    except Exception:
+        body = {}
+
+    effective_agent_id = body.get("agent_id", agent_id)
+    effective_dry_run = bool(body.get("dry_run", dry_run))
+    return await memory_dreaming_worker.run_dream_pass(
+        session, agent_id=effective_agent_id, dry_run=effective_dry_run
+    )
+
+
+@app.get("/api/v1/memory/index/{agent_id}")
+async def get_memory_index(
+    agent_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return an agent's curated compact Memory Index and state counts."""
+    from app.dreaming import get_agent_memory_index
+
+    return await get_agent_memory_index(session, agent_id)
+
+
+@app.get("/api/v1/memory/quarantine")
+async def list_quarantined_memories(
+    agent_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    session: AsyncSession = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """List quarantined web-extracted memories awaiting Dreaming or operator review."""
+    stmt = (
+        select(AgentMemoryModel)
+        .where(AgentMemoryModel.memory_type == "quarantined_web")
+        .order_by(desc(AgentMemoryModel.created_at))
+        .limit(limit)
+    )
+    if agent_id:
+        stmt = stmt.where(AgentMemoryModel.agent_id == agent_id)
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": str(row.id),
+            "agent_id": row.agent_id,
+            "memory_type": row.memory_type,
+            "content": row.content,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/v1/memory/quarantine/{memory_id}/promote")
+async def promote_or_dismiss_quarantined_memory(
+    memory_id: uuid.UUID,
+    request: Request,
+    action: str = Query(default="promote"),
+    session: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Promote a quarantined memory to active 'semantic' memory or dismiss as 'rejected_injection'."""
+    body: Dict[str, Any] = {}
+    try:
+        raw_body = await request.body()
+        if raw_body:
+            body = json.loads(raw_body)
+    except Exception:
+        body = {}
+
+    effective_action = str(body.get("action", action) or "promote").strip().lower()
+    if effective_action not in ("promote", "dismiss"):
+        raise HTTPException(
+            status_code=400, detail="action must be 'promote' or 'dismiss'"
+        )
+
+    mem = await session.get(AgentMemoryModel, memory_id)
+    if not mem:
+        raise HTTPException(status_code=404, detail="Quarantined memory not found.")
+
+    mem.memory_type = "semantic" if effective_action == "promote" else "rejected_injection"
+    await session.commit()
+    await session.refresh(mem)
+    return {
+        "id": str(mem.id),
+        "agent_id": mem.agent_id,
+        "memory_type": mem.memory_type,
+        "content": mem.content,
+        "action": effective_action,
+    }
+
+
 @app.websocket("/ws/blackboard")
 async def websocket_blackboard_endpoint(websocket: WebSocket) -> None:
     await ws_manager.connect(websocket)
