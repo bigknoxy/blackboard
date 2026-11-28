@@ -3,6 +3,29 @@ name: End-to-End Autonomous Code Review & Release Pipeline
 description: >
   Multi-agent Blackboard pipeline: Research & Hypothesis -> Technical Spec ->
   Code Synthesis -> Sandbox Pytest Verification -> Security Critique -> HITL Sign-Off.
+capability_tags:
+  - code_review
+  - architecture
+  - testing
+  - security_audit
+  - multi_agent
+required_tools:
+  - repo_search
+  - ast_complexity_analyzer
+  - pytest_sandbox_runner
+  - static_security_scanner
+input_contract:
+  type: feature_request
+  source_type: query_keyword
+  required_fields:
+    - feature_context
+output_contract:
+  type: review_and_security_report
+  target_type: security_audit_report
+  required_fields:
+    - specification
+    - test_results
+    - security_findings
 nodes:
   - id: start_pipeline
     name: Pipeline Triggered
@@ -13,6 +36,8 @@ nodes:
     type: ServiceTask
     agent_id: architect
     entry_type: hypothesis
+    required_tools:
+      - repo_search
     prompt_template: >
       Search the repository context and formulate architectural hypotheses, risk boundaries,
       and memory budget constraints for the requested feature or patch.
@@ -22,6 +47,9 @@ nodes:
     type: ServiceTask
     agent_id: architect
     entry_type: spec
+    required_tools:
+      - repo_search
+      - ast_complexity_analyzer
     prompt_template: >
       Synthesize a formal technical specification (`spec`) based on the research hypothesis
       and any operator steering instructions on the Blackboard.
@@ -31,6 +59,9 @@ nodes:
     type: ServiceTask
     agent_id: coder
     entry_type: code
+    required_tools:
+      - repo_search
+      - ast_complexity_analyzer
     prompt_template: >
       Implement production-ready Python/React code conforming strictly to the Blackboard
       specification and hydrated `<prior_experience>` memories.
@@ -40,6 +71,8 @@ nodes:
     type: VerificationTask
     agent_id: qa-tester
     entry_type: test_result
+    required_tools:
+      - pytest_sandbox_runner
     verify_command: "pytest tests/unit/ -q --tb=short"
     max_iterations: 3
     timeout: 60
@@ -58,6 +91,8 @@ nodes:
     type: ServiceTask
     agent_id: qa-tester
     entry_type: test_result
+    required_tools:
+      - pytest_sandbox_runner
     prompt_template: >
       Execute isolated unit and integration test suites against the candidate code artifact
       and publish deterministic test coverage metrics.
@@ -67,6 +102,9 @@ nodes:
     type: ServiceTask
     agent_id: sec-auditor
     entry_type: critique
+    required_tools:
+      - ast_complexity_analyzer
+      - static_security_scanner
     prompt_template: >
       Perform static security analysis (OWASP Top 10 / CWE) on the specification and code,
       and publish a security critique.

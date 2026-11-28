@@ -230,6 +230,26 @@ class WorkflowModel(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
 
+    @property
+    def capability_tags(self) -> List[str]:
+        value = (self.state_graph or {}).get("capability_tags") or []
+        return list(value) if isinstance(value, list) else []
+
+    @property
+    def required_tools(self) -> List[str]:
+        value = (self.state_graph or {}).get("required_tools") or []
+        return list(value) if isinstance(value, list) else []
+
+    @property
+    def input_contract(self) -> Dict[str, Any]:
+        value = (self.state_graph or {}).get("input_contract") or {}
+        return dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def output_contract(self) -> Dict[str, Any]:
+        value = (self.state_graph or {}).get("output_contract") or {}
+        return dict(value) if isinstance(value, dict) else {}
+
 
 class WorkflowRunModel(Base):
     __tablename__ = "workflow_runs"

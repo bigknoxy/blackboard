@@ -4,6 +4,27 @@ description: >
   Generic iterative workflow for any research, planning, or backlog-building request:
   Researcher gathers grounded evidence -> Architect synthesizes structured plan & backlog items ->
   QA Tester verifies quality and completeness, looping back (REWORK) until PASS.
+capability_tags:
+  - research
+  - planning
+  - web_search
+  - deliverable_synthesis
+  - quality_verification
+required_tools:
+  - web_search
+  - repo_search
+input_contract:
+  type: research_request
+  source_type: search_query
+  required_fields:
+    - research_question
+output_contract:
+  type: verified_research_plan
+  target_type: search_results
+  required_fields:
+    - grounded_evidence
+    - deliverable
+    - quality_verdict
 nodes:
   - id: start_research_plan
     name: Research & Planning Request Received
@@ -14,6 +35,8 @@ nodes:
     type: ServiceTask
     agent_id: researcher
     entry_type: research
+    required_tools:
+      - web_search
     prompt_template: >
       Conduct thorough research on the operator's exact request using live web search results.
       Gather concrete options, real product names, approximate prices, and clickable Markdown links
@@ -25,6 +48,8 @@ nodes:
     type: ServiceTask
     agent_id: architect
     entry_type: spec
+    required_tools:
+      - repo_search
     prompt_template: >
       Synthesize the researcher's findings into a clear, human-friendly final deliverable tailored
       to what the operator actually asked for.
@@ -41,6 +66,8 @@ nodes:
     type: ServiceTask
     agent_id: qa-tester
     entry_type: critique
+    required_tools:
+      - repo_search
     prompt_template: >
       Verify the final deliverable against the operator's original request from a human's perspective.
       Check that: (1) every constraint requested by the operator is covered (e.g., links, battery, no-solder),
